@@ -7,6 +7,14 @@
 #include "update_objects.h"
 #include "main.h"
 #include "memory.h"
+#ifdef TARGET_PS3
+#include "ps3_game.h"
+// 16:9 in a 1P race: the sky objects (clouds, stars) and the snow cover the
+// wider view. Not on the end-of-race screens, drawn in 4:3.
+#define PS3_WIDE_SKY (gPs3Wide && gScreenModeSelection == SCREEN_MODE_1P && D_8015F894 == 0)
+#else
+#define PS3_WIDE_SKY 0
+#endif
 #include "camera.h"
 #include "math_util.h"
 #include "math_util_2.h"
@@ -2681,6 +2689,9 @@ void func_80078288(s32 objectIndex) {
             } else {
                 sp3C = random_int(0x0064U) + 0x28;
                 temp_t6 = camera1->rot[1] + random_int(0x3000U) - 0x1800;
+                if (PS3_WIDE_SKY) {
+                    temp_t6 = camera1->rot[1] + (s16) ((s16) (temp_t6 - camera1->rot[1]) * 4 / 3);
+                }
                 gObjectList[objectIndex].origin_pos[0] = camera1->pos[0] + (sins(temp_t6) * sp3C);
                 gObjectList[objectIndex].origin_pos[1] = camera1->pos[1] + 45.0;
                 gObjectList[objectIndex].origin_pos[2] = camera1->pos[2] + (coss(temp_t6) * sp3C);
@@ -2858,6 +2869,11 @@ void course_update_clouds(s32 arg0) {
 
         D_8018D208 = ((D_8018D200 / 2) * DEGREES(1)) + DEGREES(10);
         D_8018D210 = (-(D_8018D200 / 2) * DEGREES(1)) - DEGREES(10);
+        if (PS3_WIDE_SKY) {
+            // the same pixels per degree, a third more of them across
+            D_8018D208 = ((D_8018D200 * 2 / 3) * DEGREES(1)) + DEGREES(10);
+            D_8018D210 = (-(D_8018D200 * 2 / 3) * DEGREES(1)) - DEGREES(10);
+        }
         D_8018D1E8 = 1.7578125 / D_8018D200;
         D_8018D218 = 0xA0;
 #if !ENABLE_CUSTOM_COURSE_ENGINE

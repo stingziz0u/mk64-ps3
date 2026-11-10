@@ -1,0 +1,22 @@
+ps3/gen -- generated files the PS3 build needs
+
+n64_symbols.S
+    Addresses of the symbols that the game code refers to but that are not
+    compiled into the PS3 binary: data inside ROM segments (segmented
+    addresses such as 0x0D001234) and ROM offsets (_xxxSegmentRomStart).
+    They are the values of the matching build of the USA ROM. No game data.
+    Regenerate with ps3/tools/gen_n64_symbols.py.
+
+include/assets/*.h
+    Declarations (names and types only) written by the decompilation's asset
+    extractor.
+
+assets/code/, assets/course_metadata/
+    Small tables of the N64 "main" code segment that the decompilation does
+    not keep in its source tree: its extractor writes them as C from the ROM
+    (lights, a few quads, course names and lengths, CPU driver parameters).
+    About 60 KB of text. They are compiled into the executable.
+
+    TODO before a public release: decide whether these stay in the repository
+    or are read from the user's ROM at start-up like everything else (see
+    source/game/ps3_romdata.c, which already does it for one palette).

@@ -157,6 +157,27 @@ void audio_reset_session_eu(OSMesg presetId) {
     OSMesg mesg;
     osRecvMesg(D_800EA3B4, &mesg, 0);
     osSendMesg(D_800EA3B0, presetId, 0);
+#ifdef TARGET_PS3
+    {
+        // On the N64 this thread now blocks until the audio thread has done
+        // the reset (several of its frames). There is no audio thread here,
+        // so run its ticks until it answers: otherwise the commands sent
+        // next (music, sound effects) are wiped out by the reset.
+        extern void ps3_audio_tick(void);
+        extern int gPs3AudioMuteOutput;
+        int i;
+
+        gPs3AudioMuteOutput = 1;
+        for (i = 0; i < 600; i++) {
+            ps3_audio_tick();
+            if (osRecvMesg(D_800EA3B4, &mesg, OS_MESG_NOBLOCK) != -1) {
+                break;
+            }
+        }
+        gPs3AudioMuteOutput = 0;
+        return;
+    }
+#endif
     osRecvMesg(D_800EA3B4, &mesg, 1);
     if (mesg != presetId) {
         osRecvMesg(D_800EA3B4, &mesg, 1);

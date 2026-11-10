@@ -1,0 +1,2896 @@
+diff --git a/ps3/Makefile b/ps3/Makefile
+index 87efa92..c17bca8 100644
+--- a/ps3/Makefile
++++ b/ps3/Makefile
+@@ -1,8 +1,7 @@
+ #----------------------------------------------------------------------------
+ # mk64-ps3 -- Mario Kart 64 (n64decomp/mk64) for PS3 homebrew (PSL1GHT)
+ #
+-# Stage 1: the game runs (logic, menus, loading from the ROM, display lists)
+-# but nothing is drawn or heard yet.
++# Stage 2: the game is drawn on the RSX. No sound yet.
+ #
+ #   make                  -> .pkg
+ #   make clean
+@@ -41,8 +40,8 @@ CC := ppu-gcc
+ LD := ppu-gcc
+ 
+ # Goes up by one with every patch; first line of the log and VERSION.TXT.
+-PATCHLEVEL := 4
+-VERSION    := stage1
++PATCHLEVEL := 5
++VERSION    := stage2
+ OUT_PKG    := mk64-ps3-$(VERSION).pkg
+ 
+ ROOT := ..
+@@ -60,7 +59,7 @@ PLAT_CFLAGS += -Isource $(LIBPSL1GHT_INC)
+ # breaks their resolution at link time.
+ PLAT_CFLAGS_VIDEO := $(filter-out -O2,$(PLAT_CFLAGS)) -O1 -fno-inline
+ 
+-PLAT_SRCS := main.c ps3_log.c ps3_pad.c ps3_video.c ps3_rom.c ps3_plat.c
++PLAT_SRCS := main.c ps3_log.c ps3_pad.c ps3_video.c ps3_rom.c ps3_plat.c ps3_rsx.c
+ PLAT_OBJS := $(PLAT_SRCS:%.c=$(OBJ)/plat/%.o)
+ 
+ #----------------------------------------------------------------------------
+@@ -135,6 +134,11 @@ $(OBJ)/plat/ps3_video.o: source/ps3_video.c
+ 	@mkdir -p $(dir $@)
+ 	$(CC) $(PLAT_CFLAGS_VIDEO) -c $< -o $@
+ 
++# ps3_rsx.c touches GCM like ps3_video.c: same treatment.
++$(OBJ)/plat/ps3_rsx.o: source/ps3_rsx.c
++	@mkdir -p $(dir $@)
++	$(CC) $(PLAT_CFLAGS_VIDEO) -c $< -o $@
++
+ $(OBJ)/sup/%.o: source/game/%.c
+ 	@mkdir -p $(dir $@)
+ 	$(CC) $(GAME_CFLAGS) -Wall -Wno-unused -c $< -o $@
+diff --git a/ps3/hosttest/host_rsx.c b/ps3/hosttest/host_rsx.c
+new file mode 100644
+index 0000000..cc7ca9f
+--- /dev/null
++++ b/ps3/hosttest/host_rsx.c
+@@ -0,0 +1,263 @@
++/* host_rsx.c -- ps3_rsx.h in software, for the host test.
++ *
++ * Draws into a 320x240 buffer with the same combiner formula as
++ * shaders/mk64_fp.fcg and writes chosen frames as PPM files, so what the
++ * display list interpreter produces can be looked at without a console. It
++ * is a reference, not a copy of the RSX: no filtering, no MSAA.
++ *
++ *   MK64_DUMP="300 600 900"   frames to write as frame_NNNNN.ppm
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++
++#include "ps3_rsx.h"
++
++#define W PS3_SCREEN_W
++#define H PS3_SCREEN_H
++#define NA 34                               /* interpolated floats per vertex */
++
++struct ps3_rtex { int w, h; uint32_t *px; };
++
++static float s_color[H][W][3];
++static float s_depth[H][W];
++static unsigned s_frame;
++static unsigned s_dump[256];
++static int s_ndump = -1;
++
++int PS3_Rsx_Init(void) { return 0; }
++void PS3_Rsx_Shutdown(void) {}
++
++void PS3_Rsx_ClearDepth(void)
++{
++    int x, y;
++    for (y = 0; y < H; y++)
++        for (x = 0; x < W; x++) s_depth[y][x] = 1.0f;
++}
++
++static int s_want;
++static long s_written;
++
++static void parse_dump(void)
++{
++    const char *e = getenv("MK64_DUMP");
++    s_ndump = 0;
++    while (e && *e && s_ndump < 256) {
++        char *end;
++        unsigned long v = strtoul(e, &end, 10);
++        if (end == e) break;
++        s_dump[s_ndump++] = (unsigned)v;
++        e = end;
++        while (*e == ' ' || *e == ',') e++;
++    }
++}
++
++void PS3_Rsx_BeginFrame(void)
++{
++    int i;
++
++    if (s_ndump < 0) parse_dump();
++    s_frame++;
++    s_want = 0;
++    for (i = 0; i < s_ndump; i++) if (s_dump[i] == s_frame) s_want = 1;
++    if (!s_want) return;                  /* only the dumped frames are drawn: qemu is slow */
++    memset(s_color, 0, sizeof(s_color));
++    PS3_Rsx_ClearDepth();
++}
++
++void PS3_Rsx_EndFrame(void)
++{
++    int i, x, y;
++    char name[64];
++    FILE *f;
++
++    if (!s_want) return;
++    snprintf(name, sizeof(name), "frame_%05u.ppm", s_frame);
++    f = fopen(name, "wb");
++    if (!f) return;
++    fprintf(f, "P6\n%d %d\n255\n", W, H);
++    for (y = 0; y < H; y++)
++        for (x = 0; x < W; x++)
++            for (i = 0; i < 3; i++) {
++                float c = s_color[y][x][i];
++                fputc((int)(c <= 0 ? 0 : c >= 1 ? 255 : c * 255.0f + 0.5f), f);
++            }
++    fclose(f);
++    printf("[host] wrote %s\n", name);
++}
++
++ps3_rtex_t *PS3_Rsx_TexCreate(int w, int h, const uint32_t *argb)
++{
++    ps3_rtex_t *t = malloc(sizeof(*t));
++    t->w = w;
++    t->h = h;
++    t->px = malloc((size_t)w * h * 4);
++    memcpy(t->px, argb, (size_t)w * h * 4);
++    return t;
++}
++
++void PS3_Rsx_TexRelease(ps3_rtex_t *t)
++{
++    if (t) { free(t->px); free(t); }
++}
++
++/* ------------------------------------------------------------------ */
++
++typedef struct { float x, y, z, w; float a[NA]; } cv_t;
++
++static void to_cv(cv_t *o, const ps3_rvert_t *v)
++{
++    int i, k = 0;
++    o->x = v->x; o->y = v->y; o->z = v->z; o->w = v->w;
++    o->a[k++] = v->u;
++    o->a[k++] = v->v;
++    for (i = 0; i < 16; i++) o->a[k++] = v->c[i / 4][i % 4] / 255.0f;
++    for (i = 0; i < 8; i++) o->a[k++] = v->wrgb[i] / 255.0f;
++    for (i = 0; i < 4; i++) o->a[k++] = v->wa[i] / 255.0f;
++    for (i = 0; i < 4; i++) o->a[k++] = v->fog[i] / 255.0f;
++}
++
++static void lerp_cv(cv_t *o, const cv_t *a, const cv_t *b, float t)
++{
++    int i;
++    o->x = a->x + (b->x - a->x) * t;
++    o->y = a->y + (b->y - a->y) * t;
++    o->z = a->z + (b->z - a->z) * t;
++    o->w = a->w + (b->w - a->w) * t;
++    for (i = 0; i < NA; i++) o->a[i] = a->a[i] + (b->a[i] - a->a[i]) * t;
++}
++
++static float wrapf(float c, int n, int mode)
++{
++    float f;
++    if (mode == PS3_WRAP_CLAMP) {
++        f = c * n;
++        return f < 0 ? 0 : f > n - 1 ? n - 1 : f;
++    }
++    if (mode == PS3_WRAP_MIRROR) {
++        float p = c - 2.0f * floorf(c / 2.0f);
++        if (p > 1.0f) p = 2.0f - p;
++        f = p * n;
++    } else {
++        f = (c - floorf(c)) * n;
++    }
++    return f > n - 1 ? n - 1 : f;
++}
++
++static void shade(const ps3_rstate_t *st, const float *a, float out[4])
++{
++    float t[4] = { 1, 1, 1, 1 }, in[4][4];
++    const float *c = a + 2, *w = a + 18, *wa = a + 26, *fog = a + 30;
++    int k, i;
++
++    if (st->tex) {
++        int x = (int)wrapf(a[0], st->tex->w, st->wrap_s);
++        int y = (int)wrapf(a[1], st->tex->h, st->wrap_t);
++        uint32_t p = st->tex->px[y * st->tex->w + x];
++        t[0] = ((p >> 16) & 255) / 255.0f;
++        t[1] = ((p >> 8) & 255) / 255.0f;
++        t[2] = (p & 255) / 255.0f;
++        t[3] = (p >> 24) / 255.0f;
++    }
++    for (k = 0; k < 4; k++) {
++        for (i = 0; i < 3; i++) in[k][i] = c[k * 4 + i] + w[k * 2] * t[i] + w[k * 2 + 1] * t[3];
++        in[k][3] = c[k * 4 + 3] + wa[k] * t[3];
++    }
++    for (i = 0; i < 4; i++) {
++        float v = (in[0][i] - in[1][i]) * in[2][i] + in[3][i];
++        out[i] = v < 0 ? 0 : v > 1 ? 1 : v;
++    }
++    for (i = 0; i < 3; i++) out[i] += (fog[i] - out[i]) * fog[3];
++}
++
++static void raster(const ps3_rstate_t *st, const cv_t *p0, const cv_t *p1, const cv_t *p2)
++{
++    const cv_t *p[3] = { p0, p1, p2 };
++    float sx[3], sy[3], sz[3], iw[3];
++    int i, k, x, y, x0, x1, y0, y1;
++    float area;
++    int cx0 = st->sx, cy0 = st->sy, cx1 = st->sx + st->sw, cy1 = st->sy + st->sh;
++
++    if (cx0 < 0) cx0 = 0;
++    if (cy0 < 0) cy0 = 0;
++    if (cx1 > W) cx1 = W;
++    if (cy1 > H) cy1 = H;
++
++    for (i = 0; i < 3; i++) {
++        iw[i] = 1.0f / p[i]->w;
++        sx[i] = (p[i]->x * iw[i] + 1.0f) * (W / 2.0f);
++        sy[i] = (1.0f - p[i]->y * iw[i]) * (H / 2.0f);
++        sz[i] = p[i]->z * iw[i] * 0.5f + 0.5f;
++    }
++    area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
++    if (fabsf(area) < 1e-6f) return;
++
++    x0 = (int)floorf(fminf(sx[0], fminf(sx[1], sx[2])));
++    x1 = (int)ceilf(fmaxf(sx[0], fmaxf(sx[1], sx[2])));
++    y0 = (int)floorf(fminf(sy[0], fminf(sy[1], sy[2])));
++    y1 = (int)ceilf(fmaxf(sy[0], fmaxf(sy[1], sy[2])));
++    if (x0 < cx0) x0 = cx0;
++    if (y0 < cy0) y0 = cy0;
++    if (x1 > cx1) x1 = cx1;
++    if (y1 > cy1) y1 = cy1;
++
++    for (y = y0; y < y1; y++) {
++        for (x = x0; x < x1; x++) {
++            float px = x + 0.5f, py = y + 0.5f, b[3], z, q, attr[NA], col[4];
++            b[0] = ((sx[1] - px) * (sy[2] - py) - (sx[2] - px) * (sy[1] - py)) / area;
++            b[1] = ((sx[2] - px) * (sy[0] - py) - (sx[0] - px) * (sy[2] - py)) / area;
++            b[2] = 1.0f - b[0] - b[1];
++            if (b[0] < 0 || b[1] < 0 || b[2] < 0) continue;
++            z = b[0] * sz[0] + b[1] * sz[1] + b[2] * sz[2];
++            if (st->decal) z -= 0.0005f;
++            if (st->depth_test && (st->decal ? z > s_depth[y][x] : z >= s_depth[y][x])) continue;
++            q = b[0] * iw[0] + b[1] * iw[1] + b[2] * iw[2];
++            for (k = 0; k < NA; k++)
++                attr[k] = (b[0] * p[0]->a[k] * iw[0] + b[1] * p[1]->a[k] * iw[1] + b[2] * p[2]->a[k] * iw[2]) / q;
++            shade(st, attr, col);
++            if (st->alpha_ref && col[3] * 255.0f < st->alpha_ref) continue;
++            if (st->depth_write) s_depth[y][x] = z;
++            s_written++;
++            for (k = 0; k < 3; k++)
++                s_color[y][x][k] = st->blend ? col[k] * col[3] + s_color[y][x][k] * (1 - col[3]) : col[k];
++        }
++    }
++}
++
++/* Clips against the near plane (z > -w) and against w > 0. */
++void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n)
++{
++    int t, i;
++
++    if (!s_want) return;
++    s_written = 0;
++    for (t = 0; t + 2 < n; t += 3) {
++        cv_t in[3], poly[8];
++        int np = 0;
++
++        for (i = 0; i < 3; i++) to_cv(&in[i], &v[t + i]);
++        for (i = 0; i < 3; i++) {
++            const cv_t *a = &in[i], *b = &in[(i + 1) % 3];
++            float da = a->z + a->w, db = b->z + b->w;
++            if (da >= 0) poly[np++] = *a;
++            if ((da >= 0) != (db >= 0)) lerp_cv(&poly[np++], a, b, da / (da - db));
++        }
++        for (i = 1; i + 1 < np; i++) {
++            if (poly[0].w <= 0 || poly[i].w <= 0 || poly[i + 1].w <= 0) continue;
++            raster(st, &poly[0], &poly[i], &poly[i + 1]);
++        }
++    }
++    if (s_written > 4000 && getenv("MK64_DRAWLOG")) {
++        const ps3_rvert_t *q = &v[0];
++        printf("[draw] %ld px, %d verts, tex %dx%d, blend %d zt %d zw %d decal %d aref %d | v0 clip %.1f %.1f %.1f %.1f uv %.3f %.3f"
++               " A %d,%d,%d,%d B %d,%d,%d,%d C %d,%d,%d,%d D %d,%d,%d,%d w %d%d%d%d%d%d%d%d wa %d%d%d%d fog %d\n",
++               s_written, n, st->tex ? st->tex->w : 0, st->tex ? st->tex->h : 0, st->blend, st->depth_test,
++               st->depth_write, st->decal, st->alpha_ref, q->x, q->y, q->z, q->w, q->u, q->v,
++               q->c[0][0], q->c[0][1], q->c[0][2], q->c[0][3], q->c[1][0], q->c[1][1], q->c[1][2], q->c[1][3],
++               q->c[2][0], q->c[2][1], q->c[2][2], q->c[2][3], q->c[3][0], q->c[3][1], q->c[3][2], q->c[3][3],
++               q->wrgb[0] > 0, q->wrgb[1] > 0, q->wrgb[2] > 0, q->wrgb[3] > 0, q->wrgb[4] > 0, q->wrgb[5] > 0,
++               q->wrgb[6] > 0, q->wrgb[7] > 0, q->wa[0] > 0, q->wa[1] > 0, q->wa[2] > 0, q->wa[3] > 0, q->fog[3]);
++    }
++}
+diff --git a/ps3/hosttest/ppm2png.py b/ps3/hosttest/ppm2png.py
+new file mode 100644
+index 0000000..f0b87bd
+--- /dev/null
++++ b/ps3/hosttest/ppm2png.py
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++"""ppm2png.py a.ppm [b.ppm ...] -> a.png ... scaled 2x (no dependencies)."""
++import sys, zlib, struct
++for path in sys.argv[1:]:
++    d = open(path, 'rb').read().split(b'\n', 3)
++    w, h = map(int, d[1].split()); px = d[3]
++    rows = []
++    for y in range(h):
++        r = px[y * w * 3:(y + 1) * w * 3]
++        r2 = b''.join(r[i:i + 3] * 2 for i in range(0, len(r), 3))
++        rows += [b'\x00' + r2] * 2
++    c = lambda t, x: struct.pack('>I', len(x)) + t + x + struct.pack('>I', zlib.crc32(t + x))
++    open(path[:-4] + '.png', 'wb').write(b'\x89PNG\r\n\x1a\n' + c(b'IHDR', struct.pack('>IIBBBBB', w * 2, h * 2, 8, 2, 0, 0, 0))
++                                         + c(b'IDAT', zlib.compress(b''.join(rows))) + c(b'IEND', b''))
+diff --git a/ps3/hosttest/run.sh b/ps3/hosttest/run.sh
+index b7c5e7c..e48bd9f 100755
+--- a/ps3/hosttest/run.sh
++++ b/ps3/hosttest/run.sh
+@@ -5,5 +5,6 @@ set -e
+ cd "$(dirname "$0")/.."
+ OBJS=$(find build/obj/game build/obj/jp build/obj/sup build/obj/gen -name '*.o')
+ powerpc64-linux-gnu-gcc -O1 -g -Wall -Isource -c hosttest/host_main.c -o build/host_main.o
+-powerpc64-linux-gnu-gcc -static -o build/mk64host build/host_main.o $OBJS -lm -lpthread
++powerpc64-linux-gnu-gcc -O2 -Wall -Isource -c hosttest/host_rsx.c -o build/host_rsx.o
++powerpc64-linux-gnu-gcc -static -o build/mk64host build/host_main.o build/host_rsx.o $OBJS -lm -lpthread
+ exec qemu-ppc64 -cpu power9 build/mk64host "$@"
+diff --git a/ps3/shaders/build_shaders.sh b/ps3/shaders/build_shaders.sh
+new file mode 100755
+index 0000000..8445d13
+--- /dev/null
++++ b/ps3/shaders/build_shaders.sh
+@@ -0,0 +1,31 @@
++#!/bin/sh
++# Rebuilds ../source/ps3_shader_data.h from the Cg sources. Only needed when a
++# shader changes: the header is committed, so building the port needs neither
++# Cg nor cgcomp.
++#
++# Needs cgc (NVIDIA Cg Toolkit 3.1: apt-get install nvidia-cg-toolkit) and
++# PSL1GHT's cgcomp ($PS3DEV/bin).
++set -e
++cd "$(dirname "$0")"
++CGCOMP=${CGCOMP:-$PS3DEV/bin/cgcomp}
++"$CGCOMP" -v mk64_vp.vcg mk64_vp.vpo
++"$CGCOMP" -f mk64_fp.fcg mk64_fp.fpo
++python3 - <<'PY'
++def arr(name, path):
++    d = open(path, 'rb').read()
++    rows = [', '.join('0x%02x' % b for b in d[i:i + 12]) for i in range(0, len(d), 12)]
++    return ('static const unsigned char %s[] __attribute__((aligned(16))) = {\n  %s\n};\n'
++            % (name, ',\n  '.join(rows)))
++out = ('/* ps3_shader_data.h -- the RSX shaders, PRECOMPILED.\n'
++       ' *\n'
++       ' * Generated by shaders/build_shaders.sh from shaders/mk64_vp.vcg and\n'
++       ' * shaders/mk64_fp.fcg. Do not edit.\n'
++       ' */\n'
++       '#ifndef PS3_SHADER_DATA_H\n#define PS3_SHADER_DATA_H\n\n'
++       + arr('shader_vp_data', 'mk64_vp.vpo') + '\n'
++       + arr('shader_fp_data', 'mk64_fp.fpo') + '\n'
++       '#endif /* PS3_SHADER_DATA_H */\n')
++open('../source/ps3_shader_data.h', 'w').write(out)
++PY
++rm -f mk64_vp.vpo mk64_fp.fpo
++echo "wrote ../source/ps3_shader_data.h"
+diff --git a/ps3/shaders/mk64_fp.fcg b/ps3/shaders/mk64_fp.fcg
+new file mode 100644
+index 0000000..1a7d34b
+--- /dev/null
++++ b/ps3/shaders/mk64_fp.fcg
+@@ -0,0 +1,30 @@
++// mk64-ps3 fragment program: the N64 colour combiner, (A - B) * C + D for
++// colour and for alpha, plus fog.
++//
++// Each of A, B, C, D is "a constant or the texel". The constant part (prim,
++// env, shade, 0, 1...) is worked out on the CPU and arrives interpolated in
++// ca..cd. The texel part is switched on with weights that are 0 or 1:
++//   w0.xy  A += x * texel.rgb + y * texel.aaa      w0.zw  the same for B
++//   w1.xy  the same for C                          w1.zw  the same for D
++//   wa     alpha of A, B, C, D += texel.a
++// fog.rgb is the fog colour and fog.a how much of it (0 = none).
++float4 main(float4 fog : COLOR0,
++            float2 uv  : TEXCOORD0,
++            float4 ca  : TEXCOORD1,
++            float4 cb  : TEXCOORD2,
++            float4 cc  : TEXCOORD3,
++            float4 cd  : TEXCOORD4,
++            float4 w0  : TEXCOORD5,
++            float4 w1  : TEXCOORD6,
++            float4 wa  : TEXCOORD7,
++            uniform sampler2D tex : TEXUNIT0) : COLOR
++{
++    float4 t = tex2D(tex, uv);
++    float4 a = ca + float4(w0.x * t.rgb + w0.y * t.aaa, wa.x * t.a);
++    float4 b = cb + float4(w0.z * t.rgb + w0.w * t.aaa, wa.y * t.a);
++    float4 c = cc + float4(w1.x * t.rgb + w1.y * t.aaa, wa.z * t.a);
++    float4 d = cd + float4(w1.z * t.rgb + w1.w * t.aaa, wa.w * t.a);
++    float4 o = saturate((a - b) * c + d);
++    o.rgb = lerp(o.rgb, fog.rgb, fog.a);
++    return o;
++}
+diff --git a/ps3/shaders/mk64_vp.vcg b/ps3/shaders/mk64_vp.vcg
+new file mode 100644
+index 0000000..b62bd73
+--- /dev/null
++++ b/ps3/shaders/mk64_vp.vcg
+@@ -0,0 +1,34 @@
++// mk64-ps3 vertex program: positions arrive in clip space, everything else
++// is passed through to the fragment program.
++void main(float4 pos  : POSITION,
++          float4 fog  : COLOR0,
++          float2 uv   : TEXCOORD0,
++          float4 ca   : TEXCOORD1,
++          float4 cb   : TEXCOORD2,
++          float4 cc   : TEXCOORD3,
++          float4 cd   : TEXCOORD4,
++          float4 w0   : TEXCOORD5,
++          float4 w1   : TEXCOORD6,
++          float4 wa   : TEXCOORD7,
++          out float4 opos : POSITION,
++          out float4 ofog : COLOR0,
++          out float2 ouv  : TEXCOORD0,
++          out float4 oca  : TEXCOORD1,
++          out float4 ocb  : TEXCOORD2,
++          out float4 occ  : TEXCOORD3,
++          out float4 ocd  : TEXCOORD4,
++          out float4 ow0  : TEXCOORD5,
++          out float4 ow1  : TEXCOORD6,
++          out float4 owa  : TEXCOORD7)
++{
++    opos = pos;
++    ofog = fog;
++    ouv  = uv;
++    oca  = ca;
++    ocb  = cb;
++    occ  = cc;
++    ocd  = cd;
++    ow0  = w0;
++    ow1  = w1;
++    owa  = wa;
++}
+diff --git a/ps3/source/game/ps3_game.c b/ps3/source/game/ps3_game.c
+index 2ec0da2..7e73871 100644
+--- a/ps3/source/game/ps3_game.c
++++ b/ps3/source/game/ps3_game.c
+@@ -1,9 +1,8 @@
+ /* ps3_game.c -- glue between the platform side and the game.
+  *
+- * Stage 1: the game runs for real (logic, menus, loading from the ROM,
+- * building display lists) but nothing is drawn. Each frame the screen shows
+- * what the display list walker counted; the same goes to the log for the
+- * first frames, on every game state change and once every 10 seconds.
++ * Stage 2: the game runs and its display lists are drawn on the RSX
++ * (ps3_gfx.c). What the interpreter counted goes to the log for the first
++ * frames, on every game state change and once every 10 seconds.
+  */
+ 
+ #include <ultra64.h>
+@@ -33,36 +32,13 @@ static void log_frame(const char* why) {
+     const ps3_gfx_stats_t* s = &gPs3GfxStats;
+ 
+     ps3_logf("[frame %u] %s: state %d, menu %d, course %d, timer %d | cmds %u, dl %u (depth %u), vtx %u in %u loads, tris %u, "
+-             "mtx %u, tex %u, texrect %u, fill %u, errors %u | heap %lu KB used, %lu KB free",
++             "mtx %u, tex %u, texrect %u, fill %u, notex %u, culled %u/%u, errors %u | heap %lu KB used, %lu KB free",
+              s->frame, why, (int) gGamestate, (int) gMenuSelection, (int) gCurrentCourseId, (int) gGlobalTimer, s->commands, s->dlCalls, s->maxDepth,
+              s->vertices, s->vtxLoads, s->triangles, s->matrices, s->textures, s->texRects, s->fillRects,
+-             s->errors, (unsigned long) ((gNextFreeMemoryAddress - (uintptr_t) _memoryPoolSegmentNoloadStart) / 1024),
++             s->texMissing, s->culledClip, s->culledBack, s->errors, (unsigned long) ((gNextFreeMemoryAddress - (uintptr_t) _memoryPoolSegmentNoloadStart) / 1024),
+              (unsigned long) ((gHeapEndPtr - gNextFreeMemoryAddress) / 1024));
+ }
+ 
+-static void status_screen(void) {
+-    static char l[8][96];
+-    const char* lines[8];
+-    const ps3_gfx_stats_t* s = &gPs3GfxStats;
+-    ps3_padstate_t pad;
+-    int i, n = 0;
+-
+-    PS3_Plat_Pad(0, &pad);
+-    snprintf(l[n++], 96, "Stage 1: the game runs, nothing is drawn yet.");
+-    snprintf(l[n++], 96, "Frame %u   game state %d   timer %d", s->frame, (int) gGamestate, (int) gGlobalTimer);
+-    snprintf(l[n++], 96, "Display list: %u commands, %u lists, depth %u", s->commands, s->dlCalls, s->maxDepth);
+-    snprintf(l[n++], 96, "%u triangles, %u vertices, %u matrices, %u textures", s->triangles, s->vertices,
+-             s->matrices, s->textures);
+-    snprintf(l[n++], 96, "%u textured and %u filled rectangles", s->texRects, s->fillRects);
+-    snprintf(l[n++], 96, "Bad addresses: %u this frame, %u in total", s->errors, s->totalErrors);
+-    snprintf(l[n++], 96, "Pad: %04X  stick %d,%d", pad.buttons, pad.lx, pad.ly);
+-    snprintf(l[n++], 96, "The pad works (try START, then Cross). SELECT+START: quit.");
+-    for (i = 0; i < n; i++) {
+-        lines[i] = l[i];
+-    }
+-    PS3_Plat_TextScreen("MK64-PS3", lines, n);
+-}
+-
+ void ps3_frame_end(void) {
+     static uint64_t frameStart;
+     static s32 lastState = -1000;
+@@ -83,7 +59,7 @@ void ps3_frame_end(void) {
+     lastState = gGamestate;
+     lastMenu = gMenuSelection;
+ 
+-    status_screen();
++    ps3_gfx_end_frame();
+ 
+     PS3_Plat_Pump();
+     PS3_Plat_Pad(0, &pad);
+diff --git a/ps3/source/game/ps3_game.h b/ps3/source/game/ps3_game.h
+index c737f3b..a000dde 100644
+--- a/ps3/source/game/ps3_game.h
++++ b/ps3/source/game/ps3_game.h
+@@ -23,6 +23,7 @@ void ps3_frame_end(void);                 /* called from osViSwapBuffer */
+ 
+ /* source/game/ps3_gfx_walk.c: the display list of a frame (an OSTask*). */
+ void ps3_gfx_run_task(void* task);
++void ps3_gfx_end_frame(void);            /* shows the frame (osViSwapBuffer) */
+ 
+ /* source/game/ps3_romdata.c: main-segment data that is not in the source. */
+ void ps3_romdata_load(void);
+diff --git a/ps3/source/game/ps3_gfx.c b/ps3/source/game/ps3_gfx.c
+new file mode 100644
+index 0000000..b83b7fd
+--- /dev/null
++++ b/ps3/source/game/ps3_gfx.c
+@@ -0,0 +1,1433 @@
++/* ps3_gfx.c -- the display list interpreter: what the RSP microcode (F3DEX)
++ * and the RDP do on the N64, up to triangles in clip space for ps3_rsx.h.
++ *
++ *   RSP side: matrix stack, vertex transform, lighting, texture coordinate
++ *             generation, fog, culling, viewport.
++ *   RDP side: tiles and texture loads (converted to A8R8G8B8 and cached),
++ *             colour combiner (turned into per-vertex inputs of the one
++ *             fragment program), render mode (blend, depth, alpha test),
++ *             rectangles, scissor.
++ *
++ * The method (one pass, vertices lit and projected on the CPU, combiner
++ * inputs resolved per vertex) is the usual one of the PC ports of N64 games.
++ * The commands are decoded for the old F3DEX of Mario Kart 64 (F3D_OLD).
++ */
++
++#include <ultra64.h>
++#include <PR/gbi.h>
++#include <string.h>
++#include <math.h>
++
++#include "ps3_game.h"
++#include "ps3_gfx_walk.h"
++#include "ps3_rsx.h"
++
++ps3_gfx_stats_t gPs3GfxStats;
++
++#define MAX_DL_DEPTH    18
++#define MAX_COMMANDS    400000            /* a runaway list stops here */
++#define MAX_ERRORS_LOGGED 40
++#define MAX_VERTS       64
++#define MAX_LIGHTS      8
++#define BATCH_VERTS     3072
++
++/* ------------------------------------------------------------------ */
++/* State                                                               */
++/* ------------------------------------------------------------------ */
++
++typedef struct {
++    float x, y, z, w;                     /* clip space, before the viewport */
++    float u, v;                           /* texels * 32 (s10.5) */
++    u8 r, g, b, a;                        /* shade; a is the fog amount with G_FOG */
++    u8 clip;
++} vert_t;
++
++typedef struct {
++    u8 fmt, siz, palette, cms, cmt, masks, maskt, shifts, shiftt;
++    u16 line, tmem;
++    u16 uls, ult, lrs, lrt;               /* 10.2 */
++} tile_t;
++
++/* What a load command left at a TMEM address. */
++typedef struct {
++    const u8* addr;                       /* NULL = nothing loaded */
++    u32 bytes;                            /* LOADBLOCK: bytes loaded */
++    u8 isTile;                            /* LOADTILE: a rectangle of the image */
++    u8 siz;                               /* texel size of the image it came from */
++    u16 imgWidth;                         /* LOADTILE: width of the image, texels */
++    u16 uls, ult, lrs, lrt;               /* LOADTILE: the rectangle, texels */
++} load_t;
++
++static struct {
++    float mv[11][4][4];
++    int mvTop;
++    float proj[4][4];
++    float mp[4][4];
++    int mpDirty;
++
++    vert_t v[MAX_VERTS];
++
++    u32 geometryMode;
++    u16 texScaleS, texScaleT;
++    u8 texTile, texOn;
++    s16 fogMul, fogOffset;
++
++    int numLights;                        /* directional; the ambient one follows */
++    Light_t lights[MAX_LIGHTS + 1];
++    float lightDir[MAX_LIGHTS][3];        /* in model space */
++    Light_t lookat[2];
++    float lookatDir[2][3];
++    int lightsDirty;
++
++    float vpScaleX, vpScaleY, vpTransX, vpTransY;   /* pixels */
++    uintptr_t segment[16];
++} rsp;
++
++static struct {
++    tile_t tile[8];
++    load_t load[512];
++    const u8* palette[16];                /* per 16-entry slot of the upper TMEM half */
++
++    const u8* timgAddr;
++    u8 timgFmt, timgSiz;
++    u16 timgWidth;
++
++    u32 otherModeH, otherModeL;
++    u32 combineHi, combineLo;
++    u8 env[4], prim[4], blend[4], fog[4], fill[4];
++    u8 primLodFrac;
++
++    s16 scX, scY, scW, scH;
++    uintptr_t colorImage, depthImage;
++} rdp;
++
++static u32 sFrame;
++static int sFrameOpen;
++static int sErrorsLogged;
++
++/* ------------------------------------------------------------------ */
++/* Addresses                                                           */
++/* ------------------------------------------------------------------ */
++
++/* A real address on the PS3: not in the range reserved for segmented
++ * addresses, and not in the first 64 KB (nothing is mapped there). */
++static int plausible(uintptr_t a) {
++    return a >= 0x10000 && (a < 0x01000000 || a >= 0x10000000) && a < 0xE0000000UL;
++}
++
++static uintptr_t resolve(u32 w1) {
++    u32 seg = w1 >> 24;
++
++    if (seg >= 1 && seg <= 15) {
++        return rsp.segment[seg] + (w1 & 0x00FFFFFF);
++    }
++    return (uintptr_t) w1;
++}
++
++static void bad(const char* what, u32 w0, u32 w1) {
++    gPs3GfxStats.errors++;
++    if (sErrorsLogged < MAX_ERRORS_LOGGED) {
++        sErrorsLogged++;
++        ps3_logf("[gfx] frame %u: %s: w0 %08X w1 %08X -> 0x%lX", sFrame, what, w0, w1, (unsigned long) resolve(w1));
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Texture cache                                                       */
++/* ------------------------------------------------------------------ */
++
++#define TEX_MAX      2048
++#define TEX_HASH     8192                 /* > 2 * TEX_MAX, power of two */
++#define TEX_MAX_DIM  512
++#define TEX_KEEP_FRAMES 300
++
++typedef struct {
++    u32 key;                              /* hash of the parameters and the contents */
++    u16 w, h;
++    u32 lastUsed;
++    ps3_rtex_t* tex;
++} texent_t;
++
++static texent_t sTex[TEX_MAX];
++static int sTexCount;
++static s16 sTexIndex[TEX_HASH];           /* -1 = empty */
++static u32 sConv[TEX_MAX_DIM * TEX_MAX_DIM];
++
++/* The texture a tile resolves to stays the same until a load or a tile
++ * command: sTexGen counts those. */
++static u32 sTexGen;
++static struct {
++    u32 gen;
++    texent_t* ent;
++} sTileTex[8];
++
++static u32 fnv(u32 h, const u8* p, u32 n) {
++    while (n--) {
++        h = (h ^ *p++) * 16777619u;
++    }
++    return h;
++}
++
++static void tex_index_rebuild(void) {
++    int i;
++
++    memset(sTexIndex, 0xFF, sizeof(sTexIndex));
++    for (i = 0; i < sTexCount; i++) {
++        u32 slot = sTex[i].key & (TEX_HASH - 1);
++
++        while (sTexIndex[slot] >= 0) {
++            slot = (slot + 1) & (TEX_HASH - 1);
++        }
++        sTexIndex[slot] = (s16) i;
++    }
++}
++
++/* Drops what has not been used for a while. Called between frames. */
++static void tex_evict(int all) {
++    int i, kept = 0;
++
++    for (i = 0; i < sTexCount; i++) {
++        if (all || sFrame - sTex[i].lastUsed > TEX_KEEP_FRAMES) {
++            PS3_Rsx_TexRelease(sTex[i].tex);
++        } else {
++            sTex[kept++] = sTex[i];
++        }
++    }
++    if (kept != sTexCount) {
++        sTexCount = kept;
++        tex_index_rebuild();
++    }
++    sTexGen++;                            /* cached pointers into sTex[] are stale */
++}
++
++static u32 rgba16_to_argb(u32 c) {
++    u32 r = (c >> 11) & 31, g = (c >> 6) & 31, b = (c >> 1) & 31;
++
++    r = (r << 3) | (r >> 2);
++    g = (g << 3) | (g >> 2);
++    b = (b << 3) | (b >> 2);
++    return ((c & 1) ? 0xFF000000u : 0) | (r << 16) | (g << 8) | b;
++}
++
++static u32 ia16_to_argb(u32 c) {
++    u32 i = c >> 8;
++
++    return ((c & 0xFF) << 24) | (i << 16) | (i << 8) | i;
++}
++
++/* Converts w*h texels starting at texel x0 of rows `stride` bytes apart. */
++static void tex_convert(const u8* src, u32 stride, u32 x0, int w, int h, int fmt, int siz, const u8* pal,
++                        int palIsIA) {
++    int x, y;
++    u32* dst = sConv;
++
++    for (y = 0; y < h; y++, src += stride) {
++        for (x = 0; x < w; x++) {
++            u32 n = x0 + (u32) x, c, i, a;
++
++            switch (siz) {
++                case G_IM_SIZ_4b:
++                    c = (src[n >> 1] >> ((n & 1) ? 0 : 4)) & 15;
++                    break;
++                case G_IM_SIZ_8b:
++                    c = src[n];
++                    break;
++                case G_IM_SIZ_16b:
++                    c = ((u32) src[n * 2] << 8) | src[n * 2 + 1];
++                    break;
++                default:
++                    c = ((u32) src[n * 4] << 24) | ((u32) src[n * 4 + 1] << 16) | ((u32) src[n * 4 + 2] << 8) |
++                        src[n * 4 + 3];
++                    break;
++            }
++
++            if (fmt == G_IM_FMT_CI && pal != NULL) {
++                c = ((u32) pal[c * 2] << 8) | pal[c * 2 + 1];
++                *dst++ = palIsIA ? ia16_to_argb(c) : rgba16_to_argb(c);
++            } else if (siz == G_IM_SIZ_32b) {
++                *dst++ = (c >> 8) | (c << 24);        /* RGBA -> ARGB */
++            } else if (fmt == G_IM_FMT_RGBA) {
++                *dst++ = rgba16_to_argb(c);
++            } else if (fmt == G_IM_FMT_IA) {
++                if (siz == G_IM_SIZ_4b) {
++                    i = (c >> 1) * 255 / 7;
++                    a = (c & 1) ? 255 : 0;
++                } else if (siz == G_IM_SIZ_8b) {
++                    i = (c >> 4) * 17;
++                    a = (c & 15) * 17;
++                } else {
++                    i = c >> 8;
++                    a = c & 0xFF;
++                }
++                *dst++ = (a << 24) | (i << 16) | (i << 8) | i;
++            } else {                                  /* I (and CI with no palette) */
++                i = (siz == G_IM_SIZ_4b) ? c * 17 : (c & 0xFF);
++                *dst++ = (i << 24) | (i << 16) | (i << 8) | i;
++            }
++        }
++    }
++}
++
++/* The texture a render tile shows, converted and uploaded. NULL if nothing
++ * usable is loaded for it. */
++static texent_t* tex_for_tile(int t) {
++    const tile_t* tile = &rdp.tile[t];
++    const load_t* ld = &rdp.load[tile->tmem & 511];
++    const u8* src;
++    const u8* pal = NULL;
++    u32 stride, x0 = 0, bytes, key, slot, palCount = 0;
++    int w, h, bpp, palIsIA;
++    texent_t* e;
++
++    if (sTileTex[t].gen == sTexGen) {
++        return sTileTex[t].ent;
++    }
++    sTileTex[t].gen = sTexGen;
++    sTileTex[t].ent = NULL;
++
++    if (ld->addr == NULL) {
++        return NULL;
++    }
++    bpp = 4 << tile->siz;
++    if (ld->isTile) {
++        u32 imgBpp = 4u << ld->siz;
++
++        w = ld->lrs - ld->uls + 1;
++        h = ld->lrt - ld->ult + 1;
++        stride = ((u32) ld->imgWidth * imgBpp) >> 3;
++        src = ld->addr + (u32) ld->ult * stride;
++        x0 = ld->uls;
++    } else {
++        u32 lineBytes = (u32) tile->line * 8;
++
++        if (lineBytes == 0) {
++            return NULL;
++        }
++        if (tile->siz == G_IM_SIZ_32b) {
++            w = (int) (lineBytes / 2);            /* TMEM holds RGBA32 in two halves */
++            stride = (u32) w * 4;
++        } else {
++            w = (int) (lineBytes * 8 / (u32) bpp);
++            stride = lineBytes;
++        }
++        h = (int) (ld->bytes / stride);
++        /* The tile can be smaller than what was loaded. */
++        if (tile->lrt >= tile->ult && (int) ((tile->lrt >> 2) + 1) < h && tile->ult == 0) {
++            int th = (tile->lrt >> 2) + 1;
++
++            if (tile->maskt != 0 && th < (1 << tile->maskt)) {
++                th = 1 << tile->maskt;
++            }
++            if (th < h) {
++                h = th;
++            }
++        }
++        src = ld->addr;
++    }
++    if (w <= 0 || h <= 0 || w > TEX_MAX_DIM || h > TEX_MAX_DIM) {
++        return NULL;
++    }
++
++    palIsIA = ((rdp.otherModeH >> G_MDSFT_TEXTLUT) & 3) == 3;
++    if (tile->fmt == G_IM_FMT_CI) {
++        if (tile->siz == G_IM_SIZ_4b) {
++            pal = rdp.palette[tile->palette & 15];
++            palCount = 16;
++        } else {
++            pal = rdp.palette[0];
++            palCount = 256;
++        }
++    }
++
++    /* Key: the parameters and the contents. Games rewrite textures in place
++     * (animations, the kart sprites), so the address alone is not enough. */
++    bytes = (stride * (u32) (h - 1)) + ((x0 + (u32) w) * (u32) bpp + 7) / 8;
++    key = fnv(2166136261u, (const u8*) &ld->addr, sizeof(ld->addr));
++    key = (key ^ (u32) ((w << 20) | (h << 8) | (tile->fmt << 4) | tile->siz)) * 16777619u;
++    key = (key ^ (x0 | ((u32) palIsIA << 31))) * 16777619u;
++    key = fnv(key, src, bytes);
++    if (pal != NULL) {
++        key = fnv(key, pal, palCount * 2);
++    }
++
++    slot = key & (TEX_HASH - 1);
++    while (sTexIndex[slot] >= 0) {
++        e = &sTex[sTexIndex[slot]];
++        if (e->key == key && e->w == w && e->h == h) {
++            e->lastUsed = sFrame;
++            sTileTex[t].ent = e;
++            return e;
++        }
++        slot = (slot + 1) & (TEX_HASH - 1);
++    }
++
++    if (sTexCount >= TEX_MAX) {
++        return NULL;                      /* evicted between frames */
++    }
++    tex_convert(src, stride, x0, w, h, tile->fmt, tile->siz, pal, palIsIA);
++    e = &sTex[sTexCount];
++    e->tex = PS3_Rsx_TexCreate(w, h, sConv);
++    if (e->tex == NULL) {
++        return NULL;
++    }
++    e->key = key;
++    e->w = (u16) w;
++    e->h = (u16) h;
++    e->lastUsed = sFrame;
++    sTexIndex[slot] = (s16) sTexCount++;
++    gPs3GfxStats.textures++;
++    sTileTex[t].ent = e;
++    return e;
++}
++
++/* The combiner wants a texel but the tile resolves to nothing. */
++static void tex_missing(int t) {
++    static int logged;
++    const tile_t* tile = &rdp.tile[t];
++    const load_t* ld = &rdp.load[tile->tmem & 511];
++
++    gPs3GfxStats.texMissing++;
++    if (logged < 30) {
++        logged++;
++        ps3_logf("[gfx] frame %u: no texture for tile %d: fmt %d siz %d line %d tmem %d size %d,%d-%d,%d | "
++                 "load %p %s bytes %u img w %u rect %u,%u-%u,%u",
++                 sFrame, t, tile->fmt, tile->siz, tile->line, tile->tmem, tile->uls, tile->ult, tile->lrs, tile->lrt,
++                 (const void*) ld->addr, ld->isTile ? "tile" : "block", ld->bytes, ld->imgWidth, ld->uls, ld->ult,
++                 ld->lrs, ld->lrt);
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Batch                                                               */
++/* ------------------------------------------------------------------ */
++
++static ps3_rvert_t sBatch[BATCH_VERTS];
++static int sBatchCount;
++static ps3_rstate_t sBatchState;
++
++static void flush(void) {
++    if (sBatchCount > 0) {
++        PS3_Rsx_Draw(&sBatchState, sBatch, sBatchCount);
++        sBatchCount = 0;
++    }
++}
++
++/* Room for n more vertices with this state. */
++static ps3_rvert_t* batch(const ps3_rstate_t* st, int n) {
++    ps3_rvert_t* out;
++
++    if (sBatchCount > 0 && (sBatchCount + n > BATCH_VERTS || memcmp(st, &sBatchState, sizeof(*st)) != 0)) {
++        flush();
++    }
++    if (sBatchCount == 0) {
++        sBatchState = *st;
++    }
++    out = &sBatch[sBatchCount];
++    sBatchCount += n;
++    return out;
++}
++
++/* ------------------------------------------------------------------ */
++/* Combiner                                                            */
++/* ------------------------------------------------------------------ */
++
++enum { K_CONST, K_SHADE, K_SHADE_A, K_TEXEL, K_TEXEL_A };
++
++/* How to fill ps3_rvert_t for the current combine mode and colours. */
++typedef struct {
++    u8 rgbKind[4], aKind[4];
++    u8 rgb[4][3], a[4];
++    u8 usesTexture;
++} plan_t;
++
++static plan_t sPlan;
++static int sPlanDirty = 1;
++
++static void plan_rgb(plan_t* p, int k, int src) {
++    const u8* col = NULL;
++    u8 grey = 0;
++
++    /* src: the encoding of the A input; the others are mapped onto it. */
++    switch (src) {
++        case 1: case 2: p->rgbKind[k] = K_TEXEL; p->usesTexture = 1; return;
++        case 3: col = rdp.prim; break;
++        case 4: p->rgbKind[k] = K_SHADE; return;
++        case 5: col = rdp.env; break;
++        case 6: grey = 255; break;                    /* 1 */
++        case 8: case 9: p->rgbKind[k] = K_TEXEL_A; p->usesTexture = 1; return;
++        case 10: grey = rdp.prim[3]; break;
++        case 11: p->rgbKind[k] = K_SHADE_A; return;
++        case 12: grey = rdp.env[3]; break;
++        case 14: grey = rdp.primLodFrac; break;
++        default: break;                               /* combined, noise, LOD, 0 */
++    }
++    p->rgbKind[k] = K_CONST;
++    if (col != NULL) {
++        p->rgb[k][0] = col[0];
++        p->rgb[k][1] = col[1];
++        p->rgb[k][2] = col[2];
++    } else {
++        p->rgb[k][0] = p->rgb[k][1] = p->rgb[k][2] = grey;
++    }
++}
++
++static void plan_alpha(plan_t* p, int k, int src) {
++    u8 v = 0;
++
++    switch (src) {
++        case 1: case 2: p->aKind[k] = K_TEXEL; p->usesTexture = 1; return;
++        case 3: v = rdp.prim[3]; break;
++        case 4: p->aKind[k] = K_SHADE; return;
++        case 5: v = rdp.env[3]; break;
++        case 6: v = 255; break;
++        default: break;                               /* combined, LOD, 0 */
++    }
++    p->aKind[k] = K_CONST;
++    p->a[k] = v;
++}
++
++static void plan_build(void) {
++    plan_t* p = &sPlan;
++    u32 hi = rdp.combineHi, lo = rdp.combineLo;
++    int a = (hi >> 20) & 15, c = (hi >> 15) & 31, b = (lo >> 28) & 15, d = (lo >> 15) & 7;
++    int aa = (hi >> 12) & 7, ac = (hi >> 9) & 7, ab = (lo >> 12) & 7, ad = (lo >> 9) & 7;
++
++    memset(p, 0, sizeof(*p));
++    /* Colour. A: 6 = 1, 7 = noise. B: 6 = key centre, 7 = K4. C: its own
++     * table (6 = key scale, 7 = combined alpha, 8.. the alphas). D: 6 = 1. */
++    plan_rgb(p, 0, a > 7 ? 0 : (a == 7 ? 0 : a));
++    plan_rgb(p, 1, b > 5 ? 0 : b);
++    plan_rgb(p, 2, (c == 6 || c == 7 || c == 13 || c >= 15) ? 0 : c);
++    plan_rgb(p, 3, d == 7 ? 0 : d);
++    /* Alpha. A, B, D: 6 = 1, 7 = 0. C: 0 = LOD fraction, 6 = primitive LOD. */
++    plan_alpha(p, 0, aa == 7 ? 0 : aa);
++    plan_alpha(p, 1, ab == 7 ? 0 : ab);
++    if (ac == 6) {
++        p->aKind[2] = K_CONST;
++        p->a[2] = rdp.primLodFrac;
++    } else {
++        plan_alpha(p, 2, (ac == 0 || ac == 7) ? 0 : ac);
++    }
++    plan_alpha(p, 3, ad == 7 ? 0 : ad);
++    sPlanDirty = 0;
++}
++
++static void plan_apply(const plan_t* p, ps3_rvert_t* o, const u8 shade[4]) {
++    int k;
++
++    memset(o->c, 0, sizeof(o->c) + sizeof(o->wrgb) + sizeof(o->wa));
++    for (k = 0; k < 4; k++) {
++        switch (p->rgbKind[k]) {
++            case K_CONST:
++                o->c[k][0] = p->rgb[k][0];
++                o->c[k][1] = p->rgb[k][1];
++                o->c[k][2] = p->rgb[k][2];
++                break;
++            case K_SHADE:
++                o->c[k][0] = shade[0];
++                o->c[k][1] = shade[1];
++                o->c[k][2] = shade[2];
++                break;
++            case K_SHADE_A:
++                o->c[k][0] = o->c[k][1] = o->c[k][2] = shade[3];
++                break;
++            case K_TEXEL:
++                o->wrgb[k * 2] = 255;
++                break;
++            default:
++                o->wrgb[k * 2 + 1] = 255;
++                break;
++        }
++        switch (p->aKind[k]) {
++            case K_CONST:
++                o->c[k][3] = p->a[k];
++                break;
++            case K_SHADE:
++                o->c[k][3] = shade[3];
++                break;
++            default:
++                o->wa[k] = 255;
++                break;
++        }
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Render state                                                        */
++/* ------------------------------------------------------------------ */
++
++#define CYCLE_TYPE() ((rdp.otherModeH >> G_MDSFT_CYCLETYPE) & 3)   /* 0 1-cycle, 1 2-cycle, 2 copy, 3 fill */
++
++/* Blend, depth, alpha test and scissor for what is about to be drawn. */
++static void state_base(ps3_rstate_t* st, int isRect) {
++    u32 ml = rdp.otherModeL;
++    /* Translucent render modes force blending and use 1 - alpha as the
++     * memory factor of the blender's last cycle. */
++    int useAlpha = (ml & FORCE_BL) != 0 && ((ml >> 16) & 3) == G_BL_1MA;
++    int textureEdge = (ml & CVG_X_ALPHA) == CVG_X_ALPHA;
++    int zb = !isRect && (rsp.geometryMode & G_ZBUFFER) != 0;
++
++    memset(st, 0, sizeof(*st));
++    st->sx = rdp.scX;
++    st->sy = rdp.scY;
++    st->sw = rdp.scW;
++    st->sh = rdp.scH;
++    st->depth_test = zb && (ml & Z_CMP) != 0;
++    st->depth_write = zb && (ml & Z_UPD) != 0;
++    st->decal = st->depth_test && (ml & ZMODE_DEC) == ZMODE_DEC;
++    if (textureEdge) {
++        st->alpha_ref = 77;                           /* cutout: opaque or nothing */
++    } else if (useAlpha) {
++        st->blend = 1;
++        st->alpha_ref = 1;                            /* fully transparent texels write no depth */
++    }
++    if ((ml & 3) == G_AC_THRESHOLD && rdp.blend[3] > st->alpha_ref) {
++        st->alpha_ref = rdp.blend[3];
++    }
++}
++
++static void state_texture(ps3_rstate_t* st, const texent_t* e, const tile_t* tile) {
++    st->tex = e->tex;
++    st->filter = ((rdp.otherModeH >> G_MDSFT_TEXTFILT) & 3) != 0;
++    st->wrap_s = (tile->cms & G_TX_CLAMP) ? PS3_WRAP_CLAMP : ((tile->cms & G_TX_MIRROR) ? PS3_WRAP_MIRROR : PS3_WRAP_REPEAT);
++    st->wrap_t = (tile->cmt & G_TX_CLAMP) ? PS3_WRAP_CLAMP : ((tile->cmt & G_TX_MIRROR) ? PS3_WRAP_MIRROR : PS3_WRAP_REPEAT);
++    /* A texture narrower than its wrap mask repeats on the N64 inside the
++     * mask; what the port can do is repeat it whole. Only powers of two
++     * can repeat on the RSX. */
++    if ((e->w & (e->w - 1)) != 0) {
++        st->wrap_s = PS3_WRAP_CLAMP;
++    }
++    if ((e->h & (e->h - 1)) != 0) {
++        st->wrap_t = PS3_WRAP_CLAMP;
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* RSP: matrices, lights, vertices                                     */
++/* ------------------------------------------------------------------ */
++
++static void mtx_mul(float r[4][4], float a[4][4], float b[4][4]) {
++    float t[4][4];
++    int i, j;
++
++    for (i = 0; i < 4; i++) {
++        for (j = 0; j < 4; j++) {
++            t[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j];
++        }
++    }
++    memcpy(r, t, sizeof(t));
++}
++
++static void cmd_mtx(u32 w0, uintptr_t addr) {
++    const u8* p = (const u8*) addr;
++    float m[4][4];
++    u32 params = (w0 >> 16) & 0xFF;
++    int i;
++
++    /* s15.16: 16 integer halves, then 16 fraction halves. */
++    for (i = 0; i < 16; i++) {
++        s32 hi = (s16) (((u32) p[i * 2] << 8) | p[i * 2 + 1]);
++        u32 lo = ((u32) p[32 + i * 2] << 8) | p[32 + i * 2 + 1];
++
++        m[i / 4][i % 4] = (float) ((hi << 16) | (s32) lo) * (1.0f / 65536.0f);
++    }
++
++    if (params & G_MTX_PROJECTION) {
++        if (params & G_MTX_LOAD) {
++            memcpy(rsp.proj, m, sizeof(m));
++        } else {
++            mtx_mul(rsp.proj, m, rsp.proj);
++        }
++    } else {
++        if ((params & G_MTX_PUSH) && rsp.mvTop < 10) {
++            rsp.mvTop++;
++            memcpy(rsp.mv[rsp.mvTop], rsp.mv[rsp.mvTop - 1], sizeof(m));
++        }
++        if (params & G_MTX_LOAD) {
++            memcpy(rsp.mv[rsp.mvTop], m, sizeof(m));
++        } else {
++            mtx_mul(rsp.mv[rsp.mvTop], m, rsp.mv[rsp.mvTop]);
++        }
++        rsp.lightsDirty = 1;
++    }
++    rsp.mpDirty = 1;
++    gPs3GfxStats.matrices++;
++}
++
++/* A direction in world space, in the space of the model (normals are not
++ * transformed: the light is brought to them). */
++static void dir_to_model(float out[3], const signed char dir[3]) {
++    float (*m)[4] = rsp.mv[rsp.mvTop];
++    float d[3] = { dir[0] / 127.0f, dir[1] / 127.0f, dir[2] / 127.0f };
++    float len;
++    int i;
++
++    for (i = 0; i < 3; i++) {
++        out[i] = d[0] * m[i][0] + d[1] * m[i][1] + d[2] * m[i][2];
++    }
++    len = sqrtf(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
++    if (len > 0.0f) {
++        out[0] /= len;
++        out[1] /= len;
++        out[2] /= len;
++    }
++}
++
++static void cmd_vtx(u32 w0, uintptr_t addr) {
++    const Vtx* src = (const Vtx*) addr;
++    int n = (w0 >> 10) & 0x3F;
++    int v0 = ((w0 >> 16) & 0xFF) / 2;
++    int i, k;
++
++    if (v0 + n > MAX_VERTS) {
++        n = MAX_VERTS - v0;
++    }
++    if (rsp.mpDirty) {
++        mtx_mul(rsp.mp, rsp.mv[rsp.mvTop], rsp.proj);
++        rsp.mpDirty = 0;
++    }
++    if ((rsp.geometryMode & G_LIGHTING) && rsp.lightsDirty) {
++        for (k = 0; k < rsp.numLights; k++) {
++            dir_to_model(rsp.lightDir[k], rsp.lights[k].dir);
++        }
++        dir_to_model(rsp.lookatDir[0], rsp.lookat[0].dir);
++        dir_to_model(rsp.lookatDir[1], rsp.lookat[1].dir);
++        rsp.lightsDirty = 0;
++    }
++
++    for (i = 0; i < n; i++, src++) {
++        vert_t* d = &rsp.v[v0 + i];
++        float x = src->v.ob[0], y = src->v.ob[1], z = src->v.ob[2];
++        s32 u = src->v.tc[0], v = src->v.tc[1];
++
++        d->x = x * rsp.mp[0][0] + y * rsp.mp[1][0] + z * rsp.mp[2][0] + rsp.mp[3][0];
++        d->y = x * rsp.mp[0][1] + y * rsp.mp[1][1] + z * rsp.mp[2][1] + rsp.mp[3][1];
++        d->z = x * rsp.mp[0][2] + y * rsp.mp[1][2] + z * rsp.mp[2][2] + rsp.mp[3][2];
++        d->w = x * rsp.mp[0][3] + y * rsp.mp[1][3] + z * rsp.mp[2][3] + rsp.mp[3][3];
++
++        if (rsp.geometryMode & G_LIGHTING) {
++            const Light_t* amb = &rsp.lights[rsp.numLights];
++            float nx = src->n.n[0], ny = src->n.n[1], nz = src->n.n[2];
++            float r = amb->col[0], g = amb->col[1], b = amb->col[2];
++
++            for (k = 0; k < rsp.numLights; k++) {
++                float f = (nx * rsp.lightDir[k][0] + ny * rsp.lightDir[k][1] + nz * rsp.lightDir[k][2]) / 127.0f;
++
++                if (f > 0.0f) {
++                    r += f * rsp.lights[k].col[0];
++                    g += f * rsp.lights[k].col[1];
++                    b += f * rsp.lights[k].col[2];
++                }
++            }
++            d->r = (u8) (r > 255.0f ? 255.0f : r);
++            d->g = (u8) (g > 255.0f ? 255.0f : g);
++            d->b = (u8) (b > 255.0f ? 255.0f : b);
++
++            if (rsp.geometryMode & G_TEXTURE_GEN) {
++                float dx = nx * rsp.lookatDir[0][0] + ny * rsp.lookatDir[0][1] + nz * rsp.lookatDir[0][2];
++                float dy = nx * rsp.lookatDir[1][0] + ny * rsp.lookatDir[1][1] + nz * rsp.lookatDir[1][2];
++
++                u = (s32) ((dx / 127.0f + 1.0f) / 4.0f * 65536.0f);
++                v = (s32) ((dy / 127.0f + 1.0f) / 4.0f * 65536.0f);
++            }
++        } else {
++            d->r = src->v.cn[0];
++            d->g = src->v.cn[1];
++            d->b = src->v.cn[2];
++        }
++        d->a = src->v.cn[3];
++
++        d->u = (float) ((u * (s32) rsp.texScaleS) >> 16);
++        d->v = (float) ((v * (s32) rsp.texScaleT) >> 16);
++
++        d->clip = 0;
++        if (d->x < -d->w) d->clip |= 1;
++        if (d->x > d->w) d->clip |= 2;
++        if (d->y < -d->w) d->clip |= 4;
++        if (d->y > d->w) d->clip |= 8;
++        if (d->z < -d->w) d->clip |= 16;
++        if (d->z > d->w) d->clip |= 32;
++
++        if (rsp.geometryMode & G_FOG) {
++            float w = d->w, f;
++
++            if (fabsf(w) < 0.001f) {
++                w = 0.001f;
++            }
++            f = d->z / w;
++            if (f < -1.0f || w < 0.0f) {
++                f = -1.0f;
++            }
++            f = f * (float) rsp.fogMul + (float) rsp.fogOffset;
++            d->a = (u8) (f < 0.0f ? 0.0f : (f > 255.0f ? 255.0f : f));
++        }
++    }
++    gPs3GfxStats.vtxLoads++;
++    gPs3GfxStats.vertices += (unsigned) n;
++}
++
++static void emit_pos(ps3_rvert_t* o, const vert_t* v) {
++    o->x = v->x * (rsp.vpScaleX / (PS3_SCREEN_W / 2.0f)) + v->w * (rsp.vpTransX / (PS3_SCREEN_W / 2.0f) - 1.0f);
++    o->y = v->y * (rsp.vpScaleY / (PS3_SCREEN_H / 2.0f)) + v->w * (1.0f - rsp.vpTransY / (PS3_SCREEN_H / 2.0f));
++    o->z = v->z;
++    o->w = v->w;
++}
++
++static float tile_shift(float c, int shift) {
++    if (shift == 0) {
++        return c;
++    }
++    return (shift <= 10) ? c / (float) (1 << shift) : c * (float) (1 << (16 - shift));
++}
++
++static void tri(int i0, int i1, int i2) {
++    const vert_t* v[3];
++    ps3_rstate_t st;
++    ps3_rvert_t* o;
++    const texent_t* tex = NULL;
++    const tile_t* tile = &rdp.tile[rsp.texTile];
++    int useFog, i;
++
++    if (i0 >= MAX_VERTS || i1 >= MAX_VERTS || i2 >= MAX_VERTS) {
++        return;
++    }
++    v[0] = &rsp.v[i0];
++    v[1] = &rsp.v[i1];
++    v[2] = &rsp.v[i2];
++    gPs3GfxStats.triangles++;
++
++    if (v[0]->clip & v[1]->clip & v[2]->clip) {
++        gPs3GfxStats.culledClip++;
++        return;                                       /* all three outside the same plane */
++    }
++    if (rsp.geometryMode & G_CULL_BOTH) {
++        /* Facing from the homogeneous determinant of (x, y, w): its sign is
++         * the winding of what is left on screen after clipping, also when a
++         * vertex is behind the camera (dividing by w first gets that wrong,
++         * and the ground under the camera always has such vertices). */
++        float cross = v[0]->x * (v[1]->y * v[2]->w - v[2]->y * v[1]->w) -
++                      v[0]->y * (v[1]->x * v[2]->w - v[2]->x * v[1]->w) +
++                      v[0]->w * (v[1]->x * v[2]->y - v[2]->x * v[1]->y);
++
++        switch (rsp.geometryMode & G_CULL_BOTH) {
++            case G_CULL_FRONT:                        /* front = counter-clockwise, y up */
++                if (cross >= 0) { gPs3GfxStats.culledBack++; return; }
++                break;
++            case G_CULL_BACK:
++                if (cross <= 0) { gPs3GfxStats.culledBack++; return; }
++                break;
++            default:
++                return;
++        }
++    }
++    if (rdp.colorImage == rdp.depthImage) {
++        return;
++    }
++
++    if (sPlanDirty) {
++        plan_build();
++    }
++    state_base(&st, 0);
++    if (sPlan.usesTexture) {
++        tex = tex_for_tile(rsp.texTile);
++        if (tex != NULL) {
++            state_texture(&st, tex, tile);
++        } else {
++            tex_missing(rsp.texTile);
++        }
++    }
++    useFog = (rdp.otherModeL >> 30) == G_BL_CLR_FOG && (rsp.geometryMode & G_FOG);
++
++    o = batch(&st, 3);
++    for (i = 0; i < 3; i++, o++) {
++        /* Flat shading: the colour of the first vertex. */
++        const vert_t* cv = (rsp.geometryMode & G_SHADING_SMOOTH) ? v[i] : v[0];
++        u8 shade[4];
++
++        shade[0] = cv->r;
++        shade[1] = cv->g;
++        shade[2] = cv->b;
++        shade[3] = v[i]->a;
++        emit_pos(o, v[i]);
++        if (tex != NULL) {
++            float s = tile_shift(v[i]->u, tile->shifts) - (float) tile->uls * 8.0f;
++            float t = tile_shift(v[i]->v, tile->shiftt) - (float) tile->ult * 8.0f;
++
++            if (st.filter) {
++                s += 16.0f;                           /* half a texel: the N64 samples at the corner */
++                t += 16.0f;
++            }
++            o->u = s / 32.0f / (float) tex->w;
++            o->v = t / 32.0f / (float) tex->h;
++        } else {
++            o->u = o->v = 0.0f;
++        }
++        plan_apply(&sPlan, o, shade);
++        o->fog[0] = rdp.fog[0];
++        o->fog[1] = rdp.fog[1];
++        o->fog[2] = rdp.fog[2];
++        o->fog[3] = useFog ? v[i]->a : 0;
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Rectangles                                                          */
++/* ------------------------------------------------------------------ */
++
++/* A screen rectangle (pixels, y down) as two triangles; u/v per corner. */
++static ps3_rvert_t* rect(const ps3_rstate_t* st, float x0, float y0, float x1, float y1, float u0, float v0,
++                         float u1, float v1, int flip) {
++    static const u8 cx[6] = { 0, 1, 0, 1, 1, 0 }, cy[6] = { 0, 0, 1, 0, 1, 1 };
++    ps3_rvert_t* o = batch(st, 6);
++    int i;
++
++    for (i = 0; i < 6; i++) {
++        float fx = cx[i], fy = cy[i];
++
++        o[i].x = (x0 + (x1 - x0) * fx) / (PS3_SCREEN_W / 2.0f) - 1.0f;
++        o[i].y = 1.0f - (y0 + (y1 - y0) * fy) / (PS3_SCREEN_H / 2.0f);
++        o[i].z = 0.0f;
++        o[i].w = 1.0f;
++        if (flip) {                                   /* TEXRECTFLIP: s runs down, t runs right */
++            o[i].u = u0 + (u1 - u0) * fy;
++            o[i].v = v0 + (v1 - v0) * fx;
++        } else {
++            o[i].u = u0 + (u1 - u0) * fx;
++            o[i].v = v0 + (v1 - v0) * fy;
++        }
++        memset(o[i].c, 0, sizeof(o[i].c) + sizeof(o[i].wrgb) + sizeof(o[i].wa) + sizeof(o[i].fog));
++    }
++    return o;
++}
++
++static void cmd_fillrect(u32 w0, u32 w1) {
++    float x1 = (float) ((w0 >> 12) & 0xFFF) / 4.0f, y1 = (float) (w0 & 0xFFF) / 4.0f;
++    float x0 = (float) ((w1 >> 12) & 0xFFF) / 4.0f, y0 = (float) (w1 & 0xFFF) / 4.0f;
++    ps3_rstate_t st;
++    ps3_rvert_t* o;
++    int cycle = CYCLE_TYPE(), i;
++
++    gPs3GfxStats.fillRects++;
++    if (rdp.colorImage == rdp.depthImage) {
++        flush();
++        PS3_Rsx_ClearDepth();                         /* the game clearing its z-buffer */
++        return;
++    }
++    if (cycle >= 2) {                                 /* fill and copy include the last pixel */
++        x1 += 1.0f;
++        y1 += 1.0f;
++    }
++
++    state_base(&st, 1);
++    if (cycle == 3) {
++        st.blend = 0;
++        st.alpha_ref = 0;
++    }
++    o = rect(&st, x0, y0, x1, y1, 0, 0, 0, 0, 0);
++    if (cycle == 3) {
++        for (i = 0; i < 6; i++) {
++            memcpy(o[i].c[3], rdp.fill, 4);           /* D = the fill colour */
++        }
++    } else {
++        static const u8 flat[4] = { 255, 255, 255, 255 };
++
++        if (sPlanDirty) {
++            plan_build();
++        }
++        for (i = 0; i < 6; i++) {
++            plan_apply(&sPlan, &o[i], flat);
++            memset(o[i].wrgb, 0, sizeof(o[i].wrgb) + sizeof(o[i].wa));   /* no texture bound */
++        }
++    }
++}
++
++static void cmd_texrect(u32 w0, u32 w1, u32 st0, u32 st1, int flip) {
++    float x1 = (float) ((w0 >> 12) & 0xFFF) / 4.0f, y1 = (float) (w0 & 0xFFF) / 4.0f;
++    float x0 = (float) ((w1 >> 12) & 0xFFF) / 4.0f, y0 = (float) (w1 & 0xFFF) / 4.0f;
++    int t = (w1 >> 24) & 7;
++    float s = (float) (s16) (st0 >> 16) / 32.0f, tt = (float) (s16) (st0 & 0xFFFF) / 32.0f;
++    float dsdx = (float) (s16) (st1 >> 16) / 1024.0f, dtdy = (float) (s16) (st1 & 0xFFFF) / 1024.0f;
++    const tile_t* tile = &rdp.tile[t];
++    const texent_t* tex;
++    ps3_rstate_t st;
++    ps3_rvert_t* o;
++    float u0, v0, u1, v1, du, dv;
++    int cycle = CYCLE_TYPE(), i;
++
++    gPs3GfxStats.texRects++;
++    if (rdp.colorImage == rdp.depthImage) {
++        return;
++    }
++    if (cycle >= 2) {
++        x1 += 1.0f;
++        y1 += 1.0f;
++        dsdx /= 4.0f;                                 /* copy mode steps four texels per word */
++    }
++    tex = tex_for_tile(t);
++
++    state_base(&st, 1);
++    if (cycle == 2) {
++        st.blend = 0;
++        st.alpha_ref = (rdp.otherModeL & 3) ? 128 : 0;
++    }
++    if (tex != NULL) {
++        state_texture(&st, tex, tile);
++        if (cycle == 2) {
++            st.filter = 0;
++        }
++    }
++
++    s -= (float) tile->uls / 4.0f;
++    tt -= (float) tile->ult / 4.0f;
++    du = (flip ? (y1 - y0) : (x1 - x0)) * dsdx;
++    dv = (flip ? (x1 - x0) : (y1 - y0)) * dtdy;
++    if (tex != NULL) {
++        u0 = s / (float) tex->w;
++        v0 = tt / (float) tex->h;
++        u1 = (s + du) / (float) tex->w;
++        v1 = (tt + dv) / (float) tex->h;
++    } else {
++        u0 = v0 = u1 = v1 = 0.0f;
++    }
++
++    o = rect(&st, x0, y0, x1, y1, u0, v0, u1, v1, flip);
++    if (cycle == 2) {
++        for (i = 0; i < 6; i++) {
++            if (tex != NULL) {
++                o[i].wrgb[6] = 255;                   /* D = the texel */
++                o[i].wa[3] = 255;
++            }
++        }
++    } else {
++        static const u8 flat[4] = { 255, 255, 255, 255 };
++
++        if (sPlanDirty) {
++            plan_build();
++        }
++        for (i = 0; i < 6; i++) {
++            plan_apply(&sPlan, &o[i], flat);
++            if (tex == NULL) {
++                memset(o[i].wrgb, 0, sizeof(o[i].wrgb) + sizeof(o[i].wa));
++            }
++        }
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* RDP: tiles and loads                                                */
++/* ------------------------------------------------------------------ */
++
++static void cmd_settile(u32 w0, u32 w1) {
++    tile_t* t = &rdp.tile[(w1 >> 24) & 7];
++
++    t->fmt = (w0 >> 21) & 7;
++    t->siz = (w0 >> 19) & 3;
++    t->line = (w0 >> 9) & 0x1FF;
++    t->tmem = w0 & 0x1FF;
++    t->palette = (w1 >> 20) & 15;
++    t->cmt = (w1 >> 18) & 3;
++    t->maskt = (w1 >> 14) & 15;
++    t->shiftt = (w1 >> 10) & 15;
++    t->cms = (w1 >> 8) & 3;
++    t->masks = (w1 >> 4) & 15;
++    t->shifts = w1 & 15;
++    sTexGen++;
++}
++
++static void cmd_settilesize(u32 w0, u32 w1) {
++    tile_t* t = &rdp.tile[(w1 >> 24) & 7];
++
++    t->uls = (w0 >> 12) & 0xFFF;
++    t->ult = w0 & 0xFFF;
++    t->lrs = (w1 >> 12) & 0xFFF;
++    t->lrt = w1 & 0xFFF;
++    sTexGen++;
++}
++
++static void cmd_loadblock(u32 w0, u32 w1) {
++    const tile_t* t = &rdp.tile[(w1 >> 24) & 7];
++    load_t* ld = &rdp.load[t->tmem & 511];
++    u32 texels = ((w1 >> 12) & 0xFFF) + 1;
++
++    (void) w0;
++    ld->addr = rdp.timgAddr;
++    ld->isTile = 0;
++    ld->siz = rdp.timgSiz;
++    ld->bytes = (texels << rdp.timgSiz) >> 1;
++    sTexGen++;
++}
++
++static void cmd_loadtile(u32 w0, u32 w1) {
++    const tile_t* t = &rdp.tile[(w1 >> 24) & 7];
++    load_t* ld = &rdp.load[t->tmem & 511];
++
++    ld->addr = rdp.timgAddr;
++    ld->isTile = 1;
++    ld->siz = rdp.timgSiz;
++    ld->imgWidth = rdp.timgWidth;
++    ld->uls = ((w0 >> 12) & 0xFFF) >> 2;
++    ld->ult = (w0 & 0xFFF) >> 2;
++    ld->lrs = ((w1 >> 12) & 0xFFF) >> 2;
++    ld->lrt = (w1 & 0xFFF) >> 2;
++    ld->bytes = 0;
++    sTexGen++;
++}
++
++static void cmd_loadtlut(u32 w0, u32 w1) {
++    const tile_t* t = &rdp.tile[(w1 >> 24) & 7];
++    int count = (int) ((w1 >> 14) & 0x3FF) + 1;
++    int slot = (t->tmem >= 256) ? (t->tmem - 256) / 16 : 0;
++    int i;
++
++    (void) w0;
++    for (i = 0; i * 16 < count && slot + i < 16; i++) {
++        rdp.palette[slot + i] = rdp.timgAddr + i * 32;
++    }
++    sTexGen++;
++}
++
++/* ------------------------------------------------------------------ */
++/* The interpreter                                                     */
++/* ------------------------------------------------------------------ */
++
++static void set_color(u8 c[4], u32 w1) {
++    c[0] = (u8) (w1 >> 24);
++    c[1] = (u8) (w1 >> 16);
++    c[2] = (u8) (w1 >> 8);
++    c[3] = (u8) w1;
++    sPlanDirty = 1;
++}
++
++static void cmd_moveword(u32 w0, u32 w1) {
++    u32 index = w0 & 0xFF, offset = (w0 >> 8) & 0xFFFF;   /* F3DEX: cmd << 24 | offset << 8 | index */
++
++    switch (index) {
++        case G_MW_SEGMENT:
++            if (offset / 4 < 16) {
++                rsp.segment[offset / 4] = (uintptr_t) w1;
++            }
++            break;
++        case G_MW_NUMLIGHT:
++            rsp.numLights = (int) ((w1 - 0x80000000u) / 32) - 1;
++            if (rsp.numLights < 0) rsp.numLights = 0;
++            if (rsp.numLights > MAX_LIGHTS) rsp.numLights = MAX_LIGHTS;
++            rsp.lightsDirty = 1;
++            break;
++        case G_MW_FOG:
++            rsp.fogMul = (s16) (w1 >> 16);
++            rsp.fogOffset = (s16) w1;
++            break;
++        default:
++            break;                                        /* clip ratio, perspective normalize, ... */
++    }
++}
++
++static void cmd_movemem(u32 w0, u32 w1) {
++    u32 index = (w0 >> 16) & 0xFF;
++    uintptr_t addr = resolve(w1);
++
++    if (!plausible(addr)) {
++        bad("G_MOVEMEM from a bad address", w0, w1);
++        return;
++    }
++    if (index == G_MV_VIEWPORT) {
++        const Vp_t* vp = (const Vp_t*) addr;
++
++        rsp.vpScaleX = vp->vscale[0] / 4.0f;
++        rsp.vpScaleY = vp->vscale[1] / 4.0f;
++        rsp.vpTransX = vp->vtrans[0] / 4.0f;
++        rsp.vpTransY = vp->vtrans[1] / 4.0f;
++        flush();
++    } else if (index == G_MV_LOOKATY || index == G_MV_LOOKATX) {
++        memcpy(&rsp.lookat[index == G_MV_LOOKATY], (const void*) addr, sizeof(Light_t));
++        rsp.lightsDirty = 1;
++    } else if (index >= G_MV_L0 && index <= G_MV_L7) {
++        memcpy(&rsp.lights[(index - G_MV_L0) / 2], (const void*) addr, sizeof(Light_t));
++        rsp.lightsDirty = 1;
++    }
++}
++
++static void run(const Gfx* dl) {
++    const Gfx* stack[MAX_DL_DEPTH];
++    int depth = 0;
++    ps3_gfx_stats_t* stats = &gPs3GfxStats;
++
++    for (;;) {
++        u32 w0 = ((const u32*) dl)[0];
++        u32 w1 = ((const u32*) dl)[1];
++        u32 op = w0 >> 24;
++        uintptr_t addr;
++
++        dl++;
++        if (++stats->commands > MAX_COMMANDS) {
++            bad("too many commands, giving up", w0, w1);
++            return;
++        }
++
++        switch (op) {
++            /* ---- RSP ---- */
++            case (u8) G_ENDDL:
++                if (depth == 0) {
++                    return;
++                }
++                dl = stack[--depth];
++                break;
++
++            case (u8) G_DL:
++                addr = resolve(w1);
++                stats->dlCalls++;
++                if (!plausible(addr)) {
++                    bad("G_DL to a bad address", w0, w1);
++                    break;
++                }
++                if (((w0 >> 16) & 0xFF) == G_DL_PUSH) {
++                    if (depth >= MAX_DL_DEPTH) {
++                        bad("display list stack overflow", w0, w1);
++                        break;
++                    }
++                    stack[depth++] = dl;
++                    if ((u32) depth > stats->maxDepth) {
++                        stats->maxDepth = depth;
++                    }
++                }
++                dl = (const Gfx*) addr;
++                break;
++
++            case (u8) G_MTX:
++                addr = resolve(w1);
++                if (plausible(addr)) {
++                    cmd_mtx(w0, addr);
++                } else {
++                    bad("G_MTX from a bad address", w0, w1);
++                }
++                break;
++
++            case (u8) G_POPMTX:
++                if (rsp.mvTop > 0) {
++                    rsp.mvTop--;
++                    rsp.mpDirty = 1;
++                    rsp.lightsDirty = 1;
++                }
++                break;
++
++            case (u8) G_VTX:
++                addr = resolve(w1);
++                if (plausible(addr)) {
++                    cmd_vtx(w0, addr);
++                } else {
++                    bad("G_VTX from a bad address", w0, w1);
++                }
++                break;
++
++            case (u8) G_TRI1:
++                tri(((w1 >> 16) & 0xFF) / 2, ((w1 >> 8) & 0xFF) / 2, (w1 & 0xFF) / 2);
++                break;
++            case (u8) G_TRI2:
++                tri(((w0 >> 16) & 0xFF) / 2, ((w0 >> 8) & 0xFF) / 2, (w0 & 0xFF) / 2);
++                tri(((w1 >> 16) & 0xFF) / 2, ((w1 >> 8) & 0xFF) / 2, (w1 & 0xFF) / 2);
++                break;
++            case (u8) G_QUAD: {
++                int a = ((w1 >> 16) & 0xFF) / 2, b = ((w1 >> 8) & 0xFF) / 2, c = (w1 & 0xFF) / 2, d = (w1 >> 24) / 2;
++
++                tri(a, b, c);
++                tri(a, c, d);
++                break;
++            }
++
++            case (u8) G_MOVEWORD:
++                cmd_moveword(w0, w1);
++                break;
++            case (u8) G_MOVEMEM:
++                cmd_movemem(w0, w1);
++                break;
++
++            case (u8) G_TEXTURE:
++                rsp.texScaleS = (u16) (w1 >> 16);
++                rsp.texScaleT = (u16) w1;
++                rsp.texTile = (w0 >> 8) & 7;
++                rsp.texOn = (u8) w0;
++                break;
++
++            case (u8) G_SETGEOMETRYMODE:
++                rsp.geometryMode |= w1;
++                break;
++            case (u8) G_CLEARGEOMETRYMODE:
++                rsp.geometryMode &= ~w1;
++                break;
++
++            case (u8) G_SETOTHERMODE_H:
++            case (u8) G_SETOTHERMODE_L: {
++                u32 sft = (w0 >> 8) & 0xFF, len = w0 & 0xFF;
++                u32 mask = ((len >= 32) ? 0xFFFFFFFFu : ((1u << len) - 1)) << sft;
++
++                if (op == (u8) G_SETOTHERMODE_H) {
++                    rdp.otherModeH = (rdp.otherModeH & ~mask) | w1;
++                    sTexGen++;                        /* the palette type lives here */
++                } else {
++                    rdp.otherModeL = (rdp.otherModeL & ~mask) | w1;
++                }
++                break;
++            }
++
++            /* ---- RDP ---- */
++            case G_RDPSETOTHERMODE:
++                rdp.otherModeH = w0 & 0x00FFFFFF;
++                rdp.otherModeL = w1;
++                sTexGen++;
++                break;
++
++            case G_SETCOMBINE:
++                rdp.combineHi = w0 & 0x00FFFFFF;
++                rdp.combineLo = w1;
++                sPlanDirty = 1;
++                break;
++            case G_SETENVCOLOR:
++                set_color(rdp.env, w1);
++                break;
++            case G_SETPRIMCOLOR:
++                set_color(rdp.prim, w1);
++                rdp.primLodFrac = (u8) w0;
++                break;
++            case G_SETBLENDCOLOR:
++                set_color(rdp.blend, w1);
++                break;
++            case G_SETFOGCOLOR:
++                set_color(rdp.fog, w1);
++                break;
++            case G_SETFILLCOLOR: {
++                u32 c = rgba16_to_argb(w1 & 0xFFFF);
++
++                rdp.fill[0] = (u8) (c >> 16);
++                rdp.fill[1] = (u8) (c >> 8);
++                rdp.fill[2] = (u8) c;
++                rdp.fill[3] = (u8) (c >> 24);
++                break;
++            }
++
++            case G_SETTIMG:
++                addr = resolve(w1);
++                rdp.timgFmt = (w0 >> 21) & 7;
++                rdp.timgSiz = (w0 >> 19) & 3;
++                rdp.timgWidth = (u16) ((w0 & 0xFFF) + 1);
++                if (plausible(addr)) {
++                    rdp.timgAddr = (const u8*) addr;
++                } else {
++                    rdp.timgAddr = NULL;
++                    bad("G_SETTIMG to a bad address", w0, w1);
++                }
++                break;
++            case G_SETTILE:
++                cmd_settile(w0, w1);
++                break;
++            case G_SETTILESIZE:
++                cmd_settilesize(w0, w1);
++                break;
++            case G_LOADBLOCK:
++                cmd_loadblock(w0, w1);
++                break;
++            case G_LOADTILE:
++                cmd_loadtile(w0, w1);
++                break;
++            case G_LOADTLUT:
++                cmd_loadtlut(w0, w1);
++                break;
++
++            case G_SETCIMG:
++                flush();
++                rdp.colorImage = resolve(w1);
++                break;
++            case G_SETZIMG:
++                rdp.depthImage = resolve(w1);
++                break;
++
++            case G_SETSCISSOR: {
++                int x0 = ((w0 >> 12) & 0xFFF) >> 2, y0 = (w0 & 0xFFF) >> 2;
++                int x1 = ((w1 >> 12) & 0xFFF) >> 2, y1 = (w1 & 0xFFF) >> 2;
++
++                rdp.scX = (s16) x0;
++                rdp.scY = (s16) y0;
++                rdp.scW = (s16) (x1 > x0 ? x1 - x0 : 0);
++                rdp.scH = (s16) (y1 > y0 ? y1 - y0 : 0);
++                break;
++            }
++
++            case G_FILLRECT:
++                cmd_fillrect(w0, w1);
++                break;
++
++            case G_TEXRECT:
++            case G_TEXRECTFLIP: {
++                /* F3D_OLD: the texture coordinates follow in the w1 of two
++                 * more commands (G_RDPHALF_2, G_RDPHALF_CONT). */
++                u32 st0 = ((const u32*) dl)[1], st1 = ((const u32*) dl)[3];
++
++                dl += 2;
++                cmd_texrect(w0, w1, st0, st1, op == G_TEXRECTFLIP);
++                break;
++            }
++
++            default:
++                break;                                /* syncs, no-ops, culling hints, what is not used */
++        }
++    }
++}
++
++void ps3_gfx_run_task(void* taskPtr) {
++    OSTask* task = (OSTask*) taskPtr;
++    const Gfx* dl = (const Gfx*) task->t.data_ptr;
++    u32 errorsSoFar = gPs3GfxStats.totalErrors;
++    int i;
++
++    memset(&gPs3GfxStats, 0, sizeof(gPs3GfxStats));
++    gPs3GfxStats.frame = ++sFrame;
++    gPs3GfxStats.totalErrors = errorsSoFar;
++
++    if (sFrame == 1) {
++        memset(sTexIndex, 0xFF, sizeof(sTexIndex));
++    }
++    if ((sFrame & 63) == 0 || sTexCount > TEX_MAX - 256) {
++        tex_evict(sTexCount > TEX_MAX - 256 && (sFrame & 63) != 0);
++    }
++
++    /* What the RSP has at reset. */
++    memset(&rsp, 0, sizeof(rsp));
++    for (i = 0; i < 4; i++) {
++        rsp.mv[0][i][i] = 1.0f;
++        rsp.proj[i][i] = 1.0f;
++    }
++    rsp.mpDirty = 1;
++    rsp.lightsDirty = 1;
++    rsp.vpScaleX = rsp.vpTransX = PS3_SCREEN_W / 2.0f;
++    rsp.vpScaleY = rsp.vpTransY = PS3_SCREEN_H / 2.0f;
++    rsp.lookat[0].dir[0] = 127;
++    rsp.lookat[1].dir[1] = 127;
++    rdp.scX = rdp.scY = 0;
++    rdp.scW = PS3_SCREEN_W;
++    rdp.scH = PS3_SCREEN_H;
++    rdp.colorImage = 0;
++    rdp.depthImage = 1;
++    sPlanDirty = 1;
++    sTexGen++;
++
++    if (sFrameOpen) {
++        PS3_Rsx_EndFrame();                       /* a task with no swap after it */
++    }
++    PS3_Rsx_BeginFrame();
++    sFrameOpen = 1;
++    if (!plausible((uintptr_t) dl)) {
++        bad("the task's display list pointer is bad", 0, (u32) (uintptr_t) dl);
++    } else {
++        run(dl);
++    }
++    flush();
++    gPs3GfxStats.totalErrors += gPs3GfxStats.errors;
++}
++
++/* The frame the game just built is shown here (called from osViSwapBuffer
++ * through ps3_frame_end). */
++void ps3_gfx_end_frame(void) {
++    if (sFrameOpen) {
++        PS3_Rsx_EndFrame();
++        sFrameOpen = 0;
++    }
++}
+diff --git a/ps3/source/game/ps3_gfx_walk.c b/ps3/source/game/ps3_gfx_walk.c
+deleted file mode 100644
+index 7f30e11..0000000
+--- a/ps3/source/game/ps3_gfx_walk.c
++++ /dev/null
+@@ -1,192 +0,0 @@
+-/* ps3_gfx_walk.c -- stage 1 stand-in for the renderer.
+- *
+- * Walks the frame's display list the way the RSP would (segments, nested
+- * display lists, the end of each list) without drawing anything, and counts
+- * what it finds. It checks the whole chain the renderer will depend on: the
+- * task the game builds, 8-byte commands, segment bases, and the addresses in
+- * data that comes straight from the ROM.
+- *
+- * Fast3DEX 0.95 (F3DEX_GBI + F3D_OLD), the microcode Mario Kart 64 uses.
+- */
+-
+-#include <ultra64.h>
+-#include <PR/gbi.h>
+-#include <string.h>
+-
+-#include "ps3_game.h"
+-#include "ps3_gfx_walk.h"
+-
+-#define MAX_DEPTH 18                      /* F3DEX display list stack */
+-#define MAX_COMMANDS 400000               /* a runaway list stops here */
+-#define MAX_ERRORS_LOGGED 40
+-
+-ps3_gfx_stats_t gPs3GfxStats;
+-
+-static uintptr_t sSegment[16];
+-static int sErrorsLogged;
+-
+-/* A real address on the PS3: not in the range reserved for segmented
+- * addresses, and not in the first 64 KB (nothing is mapped there). */
+-static int plausible(uintptr_t a) {
+-    return a >= 0x10000 && (a < 0x01000000 || a >= 0x10000000) && a < 0xE0000000UL;
+-}
+-
+-static uintptr_t resolve(u32 w1) {
+-    u32 seg = w1 >> 24;
+-
+-    if (seg >= 1 && seg <= 15) {
+-        return sSegment[seg] + (w1 & 0x00FFFFFF);
+-    }
+-    return (uintptr_t) w1;
+-}
+-
+-static void bad(const char* what, const Gfx* at, u32 w0, u32 w1, uintptr_t addr) {
+-    gPs3GfxStats.errors++;
+-    if (sErrorsLogged < MAX_ERRORS_LOGGED) {
+-        sErrorsLogged++;
+-        ps3_logf("[gfx] frame %u: %s at %p: w0 %08X w1 %08X -> 0x%lX (segment base 0x%lX)",
+-                 gPs3GfxStats.frame, what, (const void*) at, w0, w1, (unsigned long) addr,
+-                 (unsigned long) sSegment[(w1 >> 24) & 15]);
+-    }
+-}
+-
+-static void walk(const Gfx* dl) {
+-    const Gfx* stack[MAX_DEPTH];
+-    int depth = 0;
+-    ps3_gfx_stats_t* st = &gPs3GfxStats;
+-
+-    for (;;) {
+-        u32 w0 = dl->words.w0;
+-        u32 w1 = ((const u32*) dl)[1];
+-        u32 op = w0 >> 24;
+-        const Gfx* cmd = dl++;
+-
+-        if (++st->commands > MAX_COMMANDS) {
+-            bad("too many commands, giving up", cmd, w0, w1, 0);
+-            return;
+-        }
+-
+-        switch (op) {
+-            case (u8) G_ENDDL:
+-                if (depth == 0) {
+-                    return;
+-                }
+-                dl = stack[--depth];
+-                break;
+-
+-            case (u8) G_DL: {
+-                uintptr_t target = resolve(w1);
+-
+-                st->dlCalls++;
+-                if (!plausible(target)) {
+-                    bad("G_DL to a bad address", cmd, w0, w1, target);
+-                    break;
+-                }
+-                if (((w0 >> 16) & 0xFF) == G_DL_PUSH) {
+-                    if (depth >= MAX_DEPTH) {
+-                        bad("display list stack overflow", cmd, w0, w1, target);
+-                        break;
+-                    }
+-                    stack[depth++] = dl;
+-                    if ((u32) depth > st->maxDepth) {
+-                        st->maxDepth = depth;
+-                    }
+-                }
+-                dl = (const Gfx*) target;
+-                break;
+-            }
+-
+-            case (u8) G_MOVEWORD:
+-                /* F3DEX: w0 = cmd << 24 | offset << 8 | index */
+-                if ((w0 & 0xFF) == G_MW_SEGMENT) {
+-                    u32 seg = ((w0 >> 8) & 0xFFFF) / 4;
+-
+-                    if (seg < 16) {
+-                        sSegment[seg] = (uintptr_t) w1;
+-                        if (seg != 0 && w1 != 0 && !plausible(w1)) {
+-                            bad("segment base is not a real address", cmd, w0, w1, w1);
+-                        }
+-                    }
+-                }
+-                break;
+-
+-            case (u8) G_VTX: {
+-                uintptr_t v = resolve(w1);
+-
+-                st->vtxLoads++;
+-                st->vertices += (w0 >> 10) & 0x3F;
+-                if (!plausible(v)) {
+-                    bad("G_VTX from a bad address", cmd, w0, w1, v);
+-                }
+-                break;
+-            }
+-
+-            case (u8) G_MTX: {
+-                uintptr_t m = resolve(w1);
+-
+-                st->matrices++;
+-                if (!plausible(m)) {
+-                    bad("G_MTX from a bad address", cmd, w0, w1, m);
+-                }
+-                break;
+-            }
+-
+-            case (u8) G_MOVEMEM: {
+-                uintptr_t m = resolve(w1);
+-
+-                if (!plausible(m)) {
+-                    bad("G_MOVEMEM from a bad address", cmd, w0, w1, m);
+-                }
+-                break;
+-            }
+-
+-            case (u8) G_TRI1:
+-                st->triangles += 1;
+-                break;
+-            case (u8) G_TRI2:
+-            case (u8) G_QUAD:
+-                st->triangles += 2;
+-                break;
+-
+-            case G_SETTIMG: {
+-                uintptr_t t = resolve(w1);
+-
+-                st->textures++;
+-                if (!plausible(t)) {
+-                    bad("G_SETTIMG to a bad address", cmd, w0, w1, t);
+-                }
+-                break;
+-            }
+-
+-            case G_TEXRECT:
+-            case G_TEXRECTFLIP:
+-                st->texRects++;
+-                break;
+-            case G_FILLRECT:
+-                st->fillRects++;
+-                break;
+-
+-            default:
+-                break;
+-        }
+-    }
+-}
+-
+-void ps3_gfx_run_task(void* taskPtr) {
+-    OSTask* task = (OSTask*) taskPtr;
+-    const Gfx* dl = (const Gfx*) task->t.data_ptr;
+-    u32 frame = gPs3GfxStats.frame;
+-    u32 errorsSoFar = gPs3GfxStats.totalErrors;
+-
+-    memset(&gPs3GfxStats, 0, sizeof(gPs3GfxStats));
+-    gPs3GfxStats.frame = frame + 1;
+-    gPs3GfxStats.totalErrors = errorsSoFar;
+-
+-    if (!plausible((uintptr_t) dl)) {
+-        bad("the task's display list pointer is bad", dl, 0, 0, (uintptr_t) dl);
+-    } else {
+-        memset(sSegment, 0, sizeof(sSegment));
+-        walk(dl);
+-    }
+-    gPs3GfxStats.totalErrors += gPs3GfxStats.errors;
+-}
+diff --git a/ps3/source/game/ps3_gfx_walk.h b/ps3/source/game/ps3_gfx_walk.h
+index 1ae8129..72a1a98 100644
+--- a/ps3/source/game/ps3_gfx_walk.h
++++ b/ps3/source/game/ps3_gfx_walk.h
+@@ -1,4 +1,4 @@
+-/* ps3_gfx_walk.h -- what the display list walker found in the last frame. */
++/* ps3_gfx_walk.h -- what the display list interpreter counted in the last frame. */
+ 
+ #ifndef PS3_GFX_WALK_H
+ #define PS3_GFX_WALK_H
+@@ -10,6 +10,8 @@ typedef struct {
+     unsigned vtxLoads, vertices, triangles;
+     unsigned matrices, textures;
+     unsigned texRects, fillRects;
++    unsigned culledClip, culledBack;      /* triangles dropped */
++    unsigned texMissing;                  /* texel wanted, nothing loaded */
+     unsigned errors;                      /* this frame */
+     unsigned totalErrors;                 /* since boot */
+ } ps3_gfx_stats_t;
+diff --git a/ps3/source/main.c b/ps3/source/main.c
+index d3b4f35..e95acb7 100644
+--- a/ps3/source/main.c
++++ b/ps3/source/main.c
+@@ -38,6 +38,7 @@
+ #include "ps3_pad.h"
+ #include "ps3_rom.h"
+ #include "ps3_plat.h"
++#include "ps3_rsx.h"
+ 
+ void PS3_Plat_RequestExit(void);     /* ps3_plat.c */
+ 
+@@ -147,6 +148,12 @@ static void game_thread(void *arg)
+     }
+     ps3_logf("[5] video %ux%u", (unsigned)PS3_Video_Width(), (unsigned)PS3_Video_Height());
+ 
++    ps3_log("[5b] RSX backend (shaders, vertex ring)");
++    if (PS3_Rsx_Init() < 0) {
++        ps3_log("[5b] FATAL: the RSX backend did not start");
++        goto done;
++    }
++
+     {
+         static const char *const wait[] = { "Reading the ROM..." };
+         PS3_Video_TextScreen(TITLE, wait, 1, -1);
+@@ -223,6 +230,7 @@ static void game_thread(void *arg)
+ done:
+     ps3_log("[9] shutdown");
+     PS3_Video_Shutdown();              /* rsxFinish: the RSX reads nothing any more */
++    PS3_Rsx_Shutdown();
+     PS3_Pad_Shutdown();
+     ps3_log("[9] shutdown complete");
+     ps3_log_shutdown();
+diff --git a/ps3/source/ps3_plat.c b/ps3/source/ps3_plat.c
+index abed89f..e036939 100644
+--- a/ps3/source/ps3_plat.c
++++ b/ps3/source/ps3_plat.c
+@@ -14,6 +14,7 @@
+ #include "ps3_log.h"
+ #include "ps3_video.h"
+ #include "ps3_pad.h"
++#include "ps3_rsx.h"
+ 
+ /* ps3_pad_bits.h repeats these values for the game side. */
+ typedef char pad_bits_match[(PS3PAD_CROSS == PAD_CROSS && PS3PAD_START == PAD_START &&
+@@ -53,6 +54,7 @@ void PS3_Plat_Exit(void)
+ {
+     ps3_log("[9] shutdown");
+     PS3_Video_Shutdown();             /* rsxFinish: the RSX reads nothing any more */
++    PS3_Rsx_Shutdown();
+     PS3_Pad_Shutdown();
+     ps3_log("[9] shutdown complete");
+     ps3_log_shutdown();
+diff --git a/ps3/source/ps3_rsx.c b/ps3/source/ps3_rsx.c
+new file mode 100644
+index 0000000..b501dfe
+--- /dev/null
++++ b/ps3/source/ps3_rsx.c
+@@ -0,0 +1,465 @@
++/* ps3_rsx.c -- the drawing backend of ps3_rsx.h on the RSX.
++ *
++ * Triangles arrive in clip space from the display list interpreter
++ * (game/ps3_gfx.c) and are drawn with one vertex program and one fragment
++ * program (shaders/, precompiled in ps3_shader_data.h). Everything GCM lives
++ * here. The calls and constants are the ones of Doom64-PS3's backend, which
++ * runs on hardware.
++ *
++ * VERTICES: a ring in RSX memory split in 3 segments, one per framebuffer.
++ * PS3_Video_BeginFrame waits until at most one flip is in flight, so when a
++ * segment is reused the RSX has finished the frame that read it.
++ *
++ * VIEWPORT: the N64 screen is 320x240 (4:3). It is centred on the output with
++ * bars at the sides, not stretched.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <ppu-types.h>
++#include <rsx/rsx.h>
++#include <rsx/gcm_sys.h>
++
++#include "ps3_rsx.h"
++#include "ps3_video.h"
++#include "ps3_log.h"
++#include "ps3_shader_data.h"
++
++#define RING_SEGMENTS   3
++#define RING_SEG_SIZE   (4 * 1024 * 1024)
++
++#define TEX_REMAP_IDENTITY  0x00AAE4       /* same as IoQuake3-PS3 */
++#define TEX_FREE_DELAY      4              /* frames before freeing */
++#define TEX_PENDING_MAX     4096
++
++struct ps3_rtex {
++    void       *data;
++    u32         offset;
++    u16         w, h;
++    int         swz;         /* 1 = swizzled (Morton), 0 = linear */
++    gcmTexture  gt;
++};
++
++typedef struct {
++    ps3_rtex_t *t;
++    u32         due;
++} pending_free_t;
++
++static int      s_ready = 0;
++
++static uint8_t *s_ring = NULL;
++static u32      s_ring_off = 0;
++static u32      s_seg = 0;
++static u32      s_head = 0;
++static int      s_warned_full = 0;
++
++static rsxVertexProgram   *s_vp = NULL;
++static void               *s_vp_ucode = NULL;
++static rsxFragmentProgram *s_fp = NULL;
++static void               *s_fp_ucode = NULL;
++static u32                 s_fp_off = 0;
++
++static pending_free_t s_pending[TEX_PENDING_MAX];
++static int            s_npending = 0;
++static u32            s_tex_bytes = 0;
++static ps3_rtex_t    *s_white = NULL;      /* bound when a draw has no texture */
++
++/* What the RSX currently has, so the same thing is not sent twice. */
++static ps3_rstate_t s_cur;
++static int          s_cur_valid = 0;
++
++/* New textures written by the CPU: invalidate the RSX texture cache before
++ * sampling. */
++static int s_tex_dirty = 0;
++
++static u32 s_frames = 0;
++static u32 s_draws = 0, s_verts = 0;
++
++/* Game area on the output, in pixels. */
++static u32 s_vx, s_vy, s_vw, s_vh;
++
++/* Offset of (x,y) in a swizzled 2^lw x 2^lh texture: interleaved bits, x
++ * first. When one dimension runs out the other's bits follow. */
++static u32 swz_offset(u32 x, u32 y, u32 lw, u32 lh)
++{
++    u32 off = 0, bit = 0;
++    while (lw || lh) {
++        if (lw) { off |= (x & 1u) << bit; x >>= 1; bit++; lw--; }
++        if (lh) { off |= (y & 1u) << bit; y >>= 1; bit++; lh--; }
++    }
++    return off;
++}
++
++static u32 ilog2u(u32 v) { u32 r = 0; while (v > 1) { v >>= 1; r++; } return r; }
++
++/* ------------------------------------------------------------------ */
++
++static int load_shaders(void)
++{
++    void *ucode;
++    u32 size;
++
++    s_vp = (rsxVertexProgram *)shader_vp_data;
++    rsxVertexProgramGetUCode(s_vp, &s_vp_ucode, &size);
++    ps3_logf("[rsx] vertex program: %u bytes of ucode", (unsigned)size);
++    if (!s_vp_ucode) {
++        ps3_log("[rsx] *** the vertex program did not load ***");
++        return -1;
++    }
++
++    /* The fragment program's ucode has to be in RSX memory. */
++    s_fp = (rsxFragmentProgram *)shader_fp_data;
++    rsxFragmentProgramGetUCode(s_fp, &ucode, &size);
++    s_fp_ucode = rsxMemalign(64, size);
++    if (!s_fp_ucode) {
++        ps3_log("[rsx] *** rsxMemalign failed for the fragment program ***");
++        return -1;
++    }
++    memcpy(s_fp_ucode, ucode, size);
++    rsxAddressToOffset(s_fp_ucode, &s_fp_off);
++    ps3_logf("[rsx] fragment program: %u bytes at offset 0x%08x", (unsigned)size, (unsigned)s_fp_off);
++    return 0;
++}
++
++int PS3_Rsx_Init(void)
++{
++    static const uint32_t white = 0xFFFFFFFFu;
++    u32 W, H;
++
++    if (s_ready) return 0;
++    if (!PS3_Video_Context()) {
++        ps3_log("[rsx] *** no video context ***");
++        return -1;
++    }
++    if (load_shaders() < 0) return -1;
++
++    s_ring = (uint8_t *)rsxMemalign(128, RING_SEGMENTS * RING_SEG_SIZE);
++    if (!s_ring) {
++        ps3_logf("[rsx] *** rsxMemalign failed for the vertex ring (%u bytes) ***",
++                 (unsigned)(RING_SEGMENTS * RING_SEG_SIZE));
++        return -1;
++    }
++    rsxAddressToOffset(s_ring, &s_ring_off);
++    ps3_logf("[rsx] vertex ring: %d x %u KB at offset 0x%08x, %u bytes per vertex",
++             RING_SEGMENTS, (unsigned)(RING_SEG_SIZE / 1024), (unsigned)s_ring_off,
++             (unsigned)sizeof(ps3_rvert_t));
++
++    W = PS3_Video_Width();
++    H = PS3_Video_Height();
++    s_vh = H;
++    s_vw = (H * 4) / 3;
++    if (s_vw > W) { s_vw = W; s_vh = (W * 3) / 4; }
++    s_vx = (W - s_vw) / 2;
++    s_vy = (H - s_vh) / 2;
++    ps3_logf("[rsx] game area %ux%u at (%u,%u) of %ux%u",
++             (unsigned)s_vw, (unsigned)s_vh, (unsigned)s_vx, (unsigned)s_vy, (unsigned)W, (unsigned)H);
++
++    s_ready = 1;
++    s_white = PS3_Rsx_TexCreate(1, 1, &white);
++    if (!s_white) {
++        ps3_log("[rsx] *** could not create the 1x1 texture ***");
++        s_ready = 0;
++        return -1;
++    }
++    ps3_log("[rsx] backend ready");
++    return 0;
++}
++
++void PS3_Rsx_Shutdown(void)
++{
++    if (!s_ready) return;
++    s_ready = 0;
++    /* The RSX is already stopped (PS3_Video_Shutdown does rsxFinish). */
++    if (s_ring)     { rsxFree(s_ring);     s_ring = NULL; }
++    if (s_fp_ucode) { rsxFree(s_fp_ucode); s_fp_ucode = NULL; }
++}
++
++/* ------------------------------------------------------------------ */
++
++void PS3_Rsx_BeginFrame(void)
++{
++    gcmContextData *ctx = PS3_Video_Context();
++    u32 W = PS3_Video_Width(), H = PS3_Video_Height();
++    float scale[4], offset[4];
++    int i;
++
++    if (!s_ready || !ctx) return;
++
++    PS3_Video_BeginFrame();
++
++    s_seg  = (u32)PS3_Video_FrameIndex() % RING_SEGMENTS;
++    s_head = 0;
++
++    /* Whole screen to black (the side bars), depth to the far end. */
++    rsxSetScissor(ctx, 0, 0, W, H);
++    rsxSetColorMask(ctx, GCM_COLOR_MASK_R | GCM_COLOR_MASK_G |
++                         GCM_COLOR_MASK_B | GCM_COLOR_MASK_A);
++    rsxSetDepthWriteEnable(ctx, GCM_TRUE);
++    rsxSetClearColor(ctx, 0xff000000u);
++    rsxSetClearDepthStencil(ctx, 0xffffff00u);
++    rsxClearSurface(ctx, GCM_CLEAR_R | GCM_CLEAR_G | GCM_CLEAR_B |
++                         GCM_CLEAR_A | GCM_CLEAR_S | GCM_CLEAR_Z);
++
++    /* Clip space (x right, y up, z -w..w) onto the game area. */
++    scale[0]  = s_vw * 0.5f;   scale[1]  = s_vh * -0.5f;  scale[2]  = 0.5f; scale[3]  = 0.0f;
++    offset[0] = s_vx + s_vw * 0.5f;
++    offset[1] = s_vy + s_vh * 0.5f;
++    offset[2] = 0.5f;
++    offset[3] = 0.0f;
++    rsxSetViewport(ctx, (u16)s_vx, (u16)s_vy, (u16)s_vw, (u16)s_vh, 0.0f, 1.0f, scale, offset);
++    rsxSetViewportClip(ctx, 0, W, H);
++
++    /* Culling is done by the interpreter (it needs it before the viewport). */
++    rsxSetCullFaceEnable(ctx, GCM_FALSE);
++    rsxSetShadeModel(ctx, GCM_SHADE_MODEL_SMOOTH);
++    rsxSetBlendEquation(ctx, GCM_FUNC_ADD, GCM_FUNC_ADD);
++    rsxSetBlendFunc(ctx, GCM_SRC_ALPHA, GCM_ONE_MINUS_SRC_ALPHA, GCM_SRC_ALPHA, GCM_ONE_MINUS_SRC_ALPHA);
++    rsxSetPolygonOffset(ctx, -2.0f, -2.0f);
++    s_cur_valid = 0;
++
++    rsxLoadVertexProgram(ctx, s_vp, s_vp_ucode);
++    rsxLoadFragmentProgramLocation(ctx, s_fp, s_fp_off, GCM_LOCATION_RSX);
++
++    s_frames++;
++
++    /* Textures released enough frames ago: the RSX no longer reads them. */
++    i = 0;
++    while (i < s_npending) {
++        if ((int)(s_frames - s_pending[i].due) >= 0) {
++            ps3_rtex_t *t = s_pending[i].t;
++            s_tex_bytes -= (u32)t->w * t->h * 4;
++            rsxFree(t->data);
++            free(t);
++            s_pending[i] = s_pending[--s_npending];
++        } else {
++            i++;
++        }
++    }
++    if ((s_frames % 600) == 1)
++        ps3_logf("[rsx] frame %u: last frame %u draws, %u vertices; %u KB of textures, %d waiting to be freed",
++                 (unsigned)s_frames, (unsigned)s_draws, (unsigned)s_verts,
++                 (unsigned)(s_tex_bytes / 1024), s_npending);
++    s_draws = 0;
++    s_verts = 0;
++}
++
++void PS3_Rsx_EndFrame(void)
++{
++    if (!s_ready) return;
++    PS3_Video_EndFrame();
++}
++
++void PS3_Rsx_ClearDepth(void)
++{
++    gcmContextData *ctx = PS3_Video_Context();
++
++    if (!s_ready || !ctx) return;
++    rsxSetScissor(ctx, s_vx, s_vy, s_vw, s_vh);
++    rsxSetDepthWriteEnable(ctx, GCM_TRUE);
++    rsxSetClearDepthStencil(ctx, 0xffffff00u);
++    rsxClearSurface(ctx, GCM_CLEAR_S | GCM_CLEAR_Z);
++    s_cur_valid = 0;
++}
++
++/* ------------------------------------------------------------------ */
++
++static u32 wrap_mode(int w)
++{
++    return w == PS3_WRAP_CLAMP ? GCM_TEXTURE_CLAMP_TO_EDGE :
++           w == PS3_WRAP_MIRROR ? GCM_TEXTURE_MIRRORED_REPEAT : GCM_TEXTURE_REPEAT;
++}
++
++static void apply_state(gcmContextData *ctx, const ps3_rstate_t *st)
++{
++    ps3_rtex_t *tex = st->tex ? st->tex : s_white;
++    ps3_rtex_t *cur_tex = s_cur.tex ? s_cur.tex : s_white;
++
++    if (s_cur_valid && memcmp(st, &s_cur, sizeof(*st)) == 0)
++        return;
++
++    if (!s_cur_valid || st->sx != s_cur.sx || st->sy != s_cur.sy ||
++        st->sw != s_cur.sw || st->sh != s_cur.sh) {
++        /* N64 pixels -> output pixels, clamped to the game area. */
++        int x0 = st->sx, y0 = st->sy, x1 = st->sx + st->sw, y1 = st->sy + st->sh;
++        u32 px0, py0, px1, py1;
++
++        if (x0 < 0) x0 = 0;
++        if (y0 < 0) y0 = 0;
++        if (x1 > PS3_SCREEN_W) x1 = PS3_SCREEN_W;
++        if (y1 > PS3_SCREEN_H) y1 = PS3_SCREEN_H;
++        if (x1 < x0) x1 = x0;
++        if (y1 < y0) y1 = y0;
++        px0 = s_vx + (u32)x0 * s_vw / PS3_SCREEN_W;
++        py0 = s_vy + (u32)y0 * s_vh / PS3_SCREEN_H;
++        px1 = s_vx + (u32)x1 * s_vw / PS3_SCREEN_W;
++        py1 = s_vy + (u32)y1 * s_vh / PS3_SCREEN_H;
++        rsxSetScissor(ctx, (u16)px0, (u16)py0, (u16)(px1 - px0), (u16)(py1 - py0));
++    }
++
++    if (!s_cur_valid || st->blend != s_cur.blend)
++        rsxSetBlendEnable(ctx, st->blend ? GCM_TRUE : GCM_FALSE);
++
++    if (!s_cur_valid || st->depth_test != s_cur.depth_test || st->decal != s_cur.decal) {
++        rsxSetDepthTestEnable(ctx, st->depth_test ? GCM_TRUE : GCM_FALSE);
++        rsxSetDepthFunc(ctx, st->decal ? GCM_LEQUAL : GCM_LESS);
++        rsxSetPolygonOffsetFillEnable(ctx, st->decal ? GCM_TRUE : GCM_FALSE);
++    }
++
++    if (!s_cur_valid || st->depth_write != s_cur.depth_write)
++        rsxSetDepthWriteEnable(ctx, st->depth_write ? GCM_TRUE : GCM_FALSE);
++
++    if (!s_cur_valid || st->alpha_ref != s_cur.alpha_ref) {
++        rsxSetAlphaTestEnable(ctx, st->alpha_ref ? GCM_TRUE : GCM_FALSE);
++        if (st->alpha_ref)
++            rsxSetAlphaFunc(ctx, GCM_GEQUAL, st->alpha_ref);
++    }
++
++    if (!s_cur_valid || tex != cur_tex || st->filter != s_cur.filter ||
++        st->wrap_s != s_cur.wrap_s || st->wrap_t != s_cur.wrap_t || s_tex_dirty) {
++        u32 f = st->filter ? GCM_TEXTURE_LINEAR : GCM_TEXTURE_NEAREST;
++        u32 ws = wrap_mode(st->wrap_s), wt = wrap_mode(st->wrap_t);
++
++        /* Linear (not swizzled) textures only work with CLAMP. */
++        if (!tex->swz) ws = wt = GCM_TEXTURE_CLAMP_TO_EDGE;
++        if (s_tex_dirty) {
++            __asm__ volatile("sync" ::: "memory");
++            rsxInvalidateTextureCache(ctx, GCM_INVALIDATE_TEXTURE);
++            s_tex_dirty = 0;
++        }
++        rsxLoadTexture(ctx, 0, &tex->gt);
++        rsxTextureControl(ctx, 0, GCM_TRUE, 0, 0, GCM_TEXTURE_MAX_ANISO_1);
++        rsxTextureFilter(ctx, 0, 0, f, f, GCM_TEXTURE_CONVOLUTION_QUINCUNX);
++        rsxTextureWrapMode(ctx, 0, ws, wt, GCM_TEXTURE_CLAMP_TO_EDGE,
++                           GCM_TEXTURE_UNSIGNED_REMAP_NORMAL,
++                           GCM_TEXTURE_ZFUNC_NEVER, 0);
++    }
++
++    s_cur = *st;
++    s_cur_valid = 1;
++}
++
++void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n)
++{
++    gcmContextData *ctx = PS3_Video_Context();
++    u32 bytes, off;
++    uint8_t *dst;
++    int i;
++
++    if (!s_ready || !ctx || n < 3) return;
++
++    bytes = (u32)n * (u32)sizeof(ps3_rvert_t);
++    if (s_head + bytes > RING_SEG_SIZE) {
++        /* What the RSX has not read yet is not overwritten: the batch is dropped. */
++        if (!s_warned_full) {
++            ps3_logf("[rsx] *** vertex segment full (%u + %u > %u): triangles dropped ***",
++                     (unsigned)s_head, (unsigned)bytes, (unsigned)RING_SEG_SIZE);
++            s_warned_full = 1;
++        }
++        return;
++    }
++
++    dst = s_ring + s_seg * RING_SEG_SIZE + s_head;
++    off = s_ring_off + s_seg * RING_SEG_SIZE + s_head;
++    memcpy(dst, v, bytes);
++    /* Each block starts aligned to 16: otherwise the attribute offsets shift
++     * and the RSX vertex fetch hangs the console (IoQuake3-PS3 note). */
++    s_head = (s_head + bytes + 15u) & ~15u;
++
++    apply_state(ctx, st);
++
++    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_POS, 0, off + 0,
++                             sizeof(ps3_rvert_t), 4, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
++    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX0, 0, off + 16,
++                             sizeof(ps3_rvert_t), 2, GCM_VERTEX_DATA_TYPE_F32, GCM_LOCATION_RSX);
++    /* TEX1..TEX4 = the constant parts of A, B, C, D; TEX5, TEX6 = the texel
++     * weights of the colour; TEX7 = those of the alpha. */
++    for (i = 0; i < 7; i++)
++        rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_TEX1 + i, 0, off + 24 + 4 * (u32)i,
++                                 sizeof(ps3_rvert_t), 4, GCM_VERTEX_DATA_TYPE_U8, GCM_LOCATION_RSX);
++    rsxBindVertexArrayAttrib(ctx, GCM_VERTEX_ATTRIB_COLOR0, 0, off + 52,
++                             sizeof(ps3_rvert_t), 4, GCM_VERTEX_DATA_TYPE_U8, GCM_LOCATION_RSX);
++
++    rsxDrawVertexArray(ctx, GCM_TYPE_TRIANGLES, 0, (u32)n);
++
++    s_draws++;
++    s_verts += (u32)n;
++    if (s_frames == 1 && s_draws == 1)
++        ps3_logf("[rsx] first draw: %d vertices", n);
++}
++
++/* ------------------------------------------------------------------ */
++
++ps3_rtex_t *PS3_Rsx_TexCreate(int w, int h, const uint32_t *argb)
++{
++    ps3_rtex_t *t;
++    u32 bytes;
++
++    if (!s_ready || w <= 0 || h <= 0) return NULL;
++
++    t = (ps3_rtex_t *)calloc(1, sizeof(*t));
++    if (!t) return NULL;
++
++    bytes = (u32)w * (u32)h * 4;
++    t->data = rsxMemalign(128, bytes);
++    if (!t->data) {
++        static int warned = 0;
++        if (!warned) {
++            ps3_logf("[rsx] *** rsxMemalign failed for a %dx%d texture (%u KB of textures in use) ***",
++                     w, h, (unsigned)(s_tex_bytes / 1024));
++            warned = 1;
++        }
++        free(t);
++        return NULL;
++    }
++    /* Native 0xAARRGGBB (big-endian) = bytes A,R,G,B = the RSX's A8R8G8B8.
++     * Powers of two are swizzled (Morton order): the only layout that can
++     * repeat on the RSX. */
++    if ((w & (w - 1)) == 0 && (h & (h - 1)) == 0) {
++        u32 *dst = (u32 *)t->data;
++        u32 lw = ilog2u((u32)w), lh = ilog2u((u32)h), x, y;
++        for (y = 0; y < (u32)h; y++)
++            for (x = 0; x < (u32)w; x++)
++                dst[swz_offset(x, y, lw, lh)] = argb[y * (u32)w + x];
++        t->swz = 1;
++    } else {
++        memcpy(t->data, argb, bytes);
++        t->swz = 0;
++    }
++    rsxAddressToOffset(t->data, &t->offset);
++    s_tex_dirty = 1;
++    t->w = (u16)w;
++    t->h = (u16)h;
++
++    memset(&t->gt, 0, sizeof(t->gt));
++    t->gt.format    = GCM_TEXTURE_FORMAT_A8R8G8B8 |
++                      (t->swz ? GCM_TEXTURE_FORMAT_SWZ : GCM_TEXTURE_FORMAT_LIN);
++    t->gt.mipmap    = 1;
++    t->gt.dimension = GCM_TEXTURE_DIMS_2D;
++    t->gt.cubemap   = GCM_FALSE;
++    t->gt.remap     = TEX_REMAP_IDENTITY;
++    t->gt.width     = (u16)w;
++    t->gt.height    = (u16)h;
++    t->gt.depth     = 1;
++    t->gt.location  = GCM_LOCATION_RSX;
++    t->gt.pitch     = t->swz ? 0 : (u32)w * 4;
++    t->gt.offset    = t->offset;
++
++    s_tex_bytes += bytes;
++    return t;
++}
++
++void PS3_Rsx_TexRelease(ps3_rtex_t *t)
++{
++    if (!t) return;
++    /* It may be referenced by frames the RSX has not drawn yet: it is freed
++     * TEX_FREE_DELAY frames later. */
++    if (s_npending < TEX_PENDING_MAX) {
++        s_pending[s_npending].t   = t;
++        s_pending[s_npending].due = s_frames + TEX_FREE_DELAY;
++        s_npending++;
++    }
++    /* If the queue ever fills, memory is lost rather than risking a hang. */
++}
+diff --git a/ps3/source/ps3_rsx.h b/ps3/source/ps3_rsx.h
+new file mode 100644
+index 0000000..773dc59
+--- /dev/null
++++ b/ps3/source/ps3_rsx.h
+@@ -0,0 +1,78 @@
++/* ps3_rsx.h -- the drawing backend: triangles in clip space, with the N64
++ * colour combiner evaluated per pixel by one fragment program.
++ *
++ * Plain C, no PSL1GHT and no N64 headers: the display list interpreter
++ * (source/game/ps3_gfx.c) is compiled against ultra64.h and the backend
++ * (source/ps3_rsx.c) against PSL1GHT, and both include this. The host test
++ * (hosttest/) implements the same interface with a software rasterizer.
++ *
++ * The screen is the N64's: 320x240, 4:3. The backend scales it to the output
++ * resolution.
++ */
++
++#ifndef PS3_RSX_H
++#define PS3_RSX_H
++
++#include <stdint.h>
++
++#define PS3_SCREEN_W 320
++#define PS3_SCREEN_H 240
++
++/* The N64 combiner computes (A - B) * C + D, separately for colour and for
++ * alpha. Each input is either the texel or something constant over the pixel
++ * (primitive/environment colour, the vertex shade, 0, 1...). Per vertex:
++ *
++ *   c[0..3]   the constant part of A, B, C, D (r, g, b, a; 0 when the input
++ *             is the texel)
++ *   wrgb[2k], wrgb[2k+1]   255 to add texel.rgb / texel.aaa to the colour of
++ *             input k (A, B, C, D), else 0
++ *   wa[k]     255 to add texel.a to the alpha of input k, else 0
++ *   fog       fog colour and, in fog[3], how much of it (0 = no fog)
++ *
++ * 56 bytes; the vertex program expects exactly this layout. */
++typedef struct {
++    float   x, y, z, w;        /* clip space: x right, y up, z -w..w */
++    float   u, v;              /* 0..1 over the texture */
++    uint8_t c[4][4];
++    uint8_t wrgb[8];
++    uint8_t wa[4];
++    uint8_t fog[4];
++} ps3_rvert_t;
++
++/* A texture already uploaded (A8R8G8B8). Opaque. */
++typedef struct ps3_rtex ps3_rtex_t;
++
++enum { PS3_WRAP_REPEAT = 0, PS3_WRAP_CLAMP = 1, PS3_WRAP_MIRROR = 2 };
++
++typedef struct {
++    ps3_rtex_t *tex;           /* NULL = no texture (the weights are all 0) */
++    uint8_t filter;            /* 0 = nearest, 1 = bilinear */
++    uint8_t wrap_s, wrap_t;    /* PS3_WRAP_* */
++    uint8_t blend;             /* 0 = opaque, 1 = src*a + dst*(1-a) */
++    uint8_t depth_test;        /* 0/1, "nearer or equal" */
++    uint8_t depth_write;       /* 0/1 */
++    uint8_t decal;             /* 1 = pull towards the camera (decal surfaces) */
++    uint8_t alpha_ref;         /* 0 = no alpha test, else discard alpha < ref */
++    int16_t sx, sy, sw, sh;    /* scissor, in N64 pixels */
++} ps3_rstate_t;
++
++/* 0 = ok. After the video is up. */
++int  PS3_Rsx_Init(void);
++void PS3_Rsx_Shutdown(void);
++
++/* One frame: BeginFrame clears to black, EndFrame shows it. */
++void PS3_Rsx_BeginFrame(void);
++void PS3_Rsx_EndFrame(void);
++
++/* w*h pixels 0xAARRGGBB. NULL if out of memory. */
++ps3_rtex_t *PS3_Rsx_TexCreate(int w, int h, const uint32_t *argb);
++/* Freed once the RSX can no longer be reading it (a few frames later). */
++void PS3_Rsx_TexRelease(ps3_rtex_t *t);
++
++/* n vertices (a multiple of 3), loose triangles, one state. */
++void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n);
++
++/* Clears the whole depth buffer. */
++void PS3_Rsx_ClearDepth(void);
++
++#endif /* PS3_RSX_H */
+diff --git a/ps3/source/ps3_shader_data.h b/ps3/source/ps3_shader_data.h
+new file mode 100644
+index 0000000..cce29c3
+--- /dev/null
++++ b/ps3/source/ps3_shader_data.h
+@@ -0,0 +1,89 @@
++/* ps3_shader_data.h -- the RSX shaders, PRECOMPILED.
++ *
++ * Generated by shaders/build_shaders.sh from shaders/mk64_vp.vcg and
++ * shaders/mk64_fp.fcg. Do not edit.
++ */
++#ifndef PS3_SHADER_DATA_H
++#define PS3_SHADER_DATA_H
++
++static const unsigned char shader_vp_data[] __attribute__((aligned(16))) = {
++  0x56, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a,
++  0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x9c, 0x00, 0x00, 0x00, 0xc0,
++  0x00, 0x00, 0xff, 0x09, 0x00, 0x3f, 0xc0, 0x05, 0x00, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x9c, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x00, 0x03, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa4, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa7, 0x00, 0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00, 0x0a, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xad, 0x00, 0x00, 0x00, 0x0b, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb0, 0x00, 0x00, 0x00, 0x0c, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb3, 0x00, 0x00, 0x00, 0x0d, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb6, 0x00, 0x00, 0x00, 0x0e, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb9, 0x00, 0x00, 0x00, 0x0f, 0x09, 0x00, 0x00, 0x00,
++  0x70, 0x6f, 0x73, 0x00, 0x66, 0x6f, 0x67, 0x00, 0x75, 0x76, 0x00, 0x63,
++  0x61, 0x00, 0x63, 0x62, 0x00, 0x63, 0x63, 0x00, 0x63, 0x64, 0x00, 0x77,
++  0x30, 0x00, 0x77, 0x31, 0x00, 0x77, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x00, 0x0d, 0x81, 0x06, 0xc0, 0x83,
++  0x60, 0x41, 0xff, 0x80, 0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x03, 0x0d,
++  0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0xff, 0x84, 0x40, 0x1f, 0x9c, 0x6c,
++  0x00, 0x40, 0x09, 0x0d, 0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0xff, 0xa0,
++  0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x0a, 0x0d, 0x81, 0x06, 0xc0, 0x83,
++  0x60, 0x41, 0xff, 0xa4, 0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x0b, 0x0d,
++  0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0xff, 0xa8, 0x40, 0x1f, 0x9c, 0x6c,
++  0x00, 0x40, 0x0c, 0x0d, 0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0xff, 0xac,
++  0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x0d, 0x0d, 0x81, 0x06, 0xc0, 0x83,
++  0x60, 0x41, 0xff, 0xb0, 0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x0e, 0x0d,
++  0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0xff, 0xb4, 0x40, 0x1f, 0x9c, 0x6c,
++  0x00, 0x40, 0x0f, 0x0d, 0x81, 0x06, 0xc0, 0x83, 0x60, 0x41, 0xff, 0xb8,
++  0x40, 0x1f, 0x9c, 0x6c, 0x00, 0x40, 0x08, 0x0d, 0x81, 0x06, 0xc0, 0x83,
++  0x60, 0x41, 0x9f, 0x9d
++};
++
++static const unsigned char shader_fp_data[] __attribute__((aligned(16))) = {
++  0x46, 0x50, 0x00, 0x00, 0x00, 0x03, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x15,
++  0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x9c, 0x00, 0x00, 0x00, 0xc0,
++  0x00, 0x00, 0x00, 0x40, 0x00, 0xff, 0x00, 0x01, 0x00, 0xfe, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0x9c, 0x00, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x00, 0x04, 0x07, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa3, 0x00, 0x00, 0x00, 0x05, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa6, 0x00, 0x00, 0x00, 0x06, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xa9, 0x00, 0x00, 0x00, 0x07, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xac, 0x00, 0x00, 0x00, 0x08, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xaf, 0x00, 0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb2, 0x00, 0x00, 0x00, 0x0a, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb5, 0x00, 0x00, 0x00, 0x0b, 0x09, 0x00, 0x00, 0x00,
++  0x00, 0x00, 0x00, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00,
++  0x66, 0x6f, 0x67, 0x00, 0x75, 0x76, 0x00, 0x63, 0x61, 0x00, 0x63, 0x62,
++  0x00, 0x63, 0x63, 0x00, 0x63, 0x64, 0x00, 0x77, 0x30, 0x00, 0x77, 0x31,
++  0x00, 0x77, 0x61, 0x00, 0x74, 0x65, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00,
++  0x9e, 0x88, 0x17, 0x00, 0xc8, 0x01, 0x1c, 0x9d, 0xc8, 0x00, 0x00, 0x01,
++  0xc8, 0x00, 0x3f, 0xe1, 0x7e, 0x84, 0x02, 0x41, 0xff, 0x10, 0x1c, 0x9d,
++  0x72, 0x01, 0x00, 0x00, 0xc8, 0x00, 0xbf, 0xe1, 0x26, 0x86, 0x02, 0x41,
++  0xda, 0x01, 0x1c, 0x9d, 0xff, 0x10, 0x00, 0x01, 0xc8, 0x00, 0xbf, 0xe1,
++  0x2e, 0x8a, 0x04, 0x41, 0x54, 0x01, 0x1c, 0x9d, 0xc9, 0x10, 0x00, 0x01,
++  0xab, 0x0c, 0x3f, 0xe0, 0x10, 0x8a, 0x01, 0x40, 0x01, 0x08, 0x1c, 0x9c,
++  0xc8, 0x00, 0x00, 0x01, 0xc8, 0x00, 0x00, 0x01, 0x10, 0x86, 0x01, 0x40,
++  0xc9, 0x08, 0x1c, 0x9d, 0xc8, 0x00, 0x00, 0x01, 0xc8, 0x00, 0x00, 0x01,
++  0x52, 0x84, 0x02, 0x41, 0xff, 0x10, 0x1c, 0x9d, 0xca, 0x01, 0x00, 0x01,
++  0xc8, 0x00, 0xbf, 0xe1, 0x2e, 0x86, 0x04, 0x41, 0x00, 0x01, 0x1c, 0x9c,
++  0xc9, 0x10, 0x00, 0x01, 0x01, 0x0c, 0x3f, 0xe0, 0xbe, 0x86, 0x03, 0x40,
++  0xc8, 0x01, 0x1c, 0x9d, 0xc9, 0x0c, 0x00, 0x01, 0xc8, 0x00, 0x3f, 0xe1,
++  0xde, 0x8a, 0x03, 0x40, 0xc8, 0x01, 0x1c, 0x9d, 0xc9, 0x14, 0x00, 0x01,
++  0xc8, 0x00, 0x3f, 0xe1, 0x1e, 0x8a, 0x03, 0x40, 0xc9, 0x0c, 0x1c, 0x9d,
++  0xc9, 0x14, 0x00, 0x03, 0xc8, 0x00, 0x00, 0x01, 0x4e, 0x86, 0x04, 0x41,
++  0xc9, 0x10, 0x1c, 0x9d, 0x54, 0x01, 0x00, 0x01, 0xff, 0x08, 0x3f, 0xe1,
++  0x10, 0x86, 0x01, 0x40, 0x55, 0x08, 0x1c, 0x9d, 0xc8, 0x00, 0x00, 0x01,
++  0xc8, 0x00, 0x00, 0x01, 0x1e, 0x86, 0x03, 0x41, 0xc8, 0x01, 0x1c, 0x9d,
++  0xc9, 0x0c, 0x00, 0x01, 0xc8, 0x00, 0x3f, 0xe1, 0x10, 0x88, 0x01, 0x40,
++  0xab, 0x08, 0x1c, 0x9c, 0xc8, 0x00, 0x00, 0x01, 0xc8, 0x00, 0x00, 0x01,
++  0x4e, 0x88, 0x04, 0x41, 0xc9, 0x10, 0x1c, 0x9d, 0x00, 0x01, 0x00, 0x00,
++  0x01, 0x08, 0x3f, 0xe0, 0xfe, 0x88, 0x03, 0x40, 0xc8, 0x01, 0x1c, 0x9d,
++  0xc9, 0x10, 0x00, 0x01, 0xc8, 0x00, 0x3f, 0xe1, 0x1e, 0x8a, 0x84, 0x40,
++  0xc9, 0x14, 0x1c, 0x9d, 0xc9, 0x10, 0x00, 0x01, 0xc9, 0x0c, 0x00, 0x01,
++  0x2e, 0x88, 0x03, 0x40, 0xc8, 0x01, 0x1c, 0x9d, 0xc9, 0x14, 0x00, 0x03,
++  0xc8, 0x00, 0x00, 0x01, 0x2e, 0x00, 0x04, 0x40, 0xfe, 0x01, 0x1c, 0x9d,
++  0xc9, 0x10, 0x00, 0x01, 0xc9, 0x14, 0x00, 0x01, 0x10, 0x01, 0x01, 0x40,
++  0xc9, 0x14, 0x1c, 0x9d, 0xc8, 0x00, 0x00, 0x01, 0xc8, 0x00, 0x00, 0x01
++};
++
++#endif /* PS3_SHADER_DATA_H */

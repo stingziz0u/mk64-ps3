@@ -1271,6 +1271,12 @@ void update_player_path_completion(s32 playerId, Player* player) {
         if ((var_v1 != 0) && (playerZ <= gPathStartZ)) {
             if (gPathStartZ < previousPlayerZ) {
                 gLapCountByPlayerId[playerId]++;
+#ifdef MK64_TEST_ONE_LAP
+                // Test build: finishing the first lap finishes the race.
+                if (gLapCountByPlayerId[playerId] == 1) {
+                    gLapCountByPlayerId[playerId] = 3;
+                }
+#endif
                 if ((gModeSelection == GRAND_PRIX) && (gLapCountByPlayerId[playerId] == 5)) {
                     if (gGPCurrentRaceRankByPlayerIdDup[playerId] == 7) {
                         // clang-format off

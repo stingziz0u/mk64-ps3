@@ -547,6 +547,14 @@ void func_8028EF28(void) {
                     add_cinematic_mode(playerId);
 
                     currentPosition = player->currentRank;
+#ifdef TARGET_PS3
+                    {
+                        extern int gPs3HostFirstPlace;   // host test only (MK64_FIRST): 0 on the console
+                        if (gPs3HostFirstPlace) {
+                            currentPosition = 0;
+                        }
+                    }
+#endif
                     player->type |= PLAYER_CPU;
 
                     if (currentPosition < 4) {

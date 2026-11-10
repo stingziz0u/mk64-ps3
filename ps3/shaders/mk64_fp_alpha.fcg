@@ -1,0 +1,48 @@
+// mk64-ps3 diagnostic fragment program: shows the alpha of layout B as grey.
+// Same inputs as mk64_fp_b.fcg. Generated from it by build_shaders.sh's
+// sources; keep the two in step.
+//
+// Layout B: the N64 colour combiner,
+// (A - B) * C + D for colour and for alpha, plus fog.
+//
+// Only the x, y, z of texture coordinates 1..6 and the four components of
+// the two colours are used: on the console the w of the texture coordinates
+// (and coordinate 7) did not arrive, which made every alpha 0.
+//
+//   t1..t4.xyz  constant part of the colour of A, B, C, D
+//   c1          constant part of the alpha of A, B, C, D
+//   t5.xyz      texel flags of the colour of A, B, C; t6.x those of D
+//   t6.y, t6.z  texel-alpha flags of the alpha of A and B, of C and D
+//   c0          fog colour, and how much of it in c0.a
+// A flag byte is 64 for "+ texel" (or the first of a pair) and 128 for
+// "+ texel alpha" (or the second of a pair); both can be set.
+float2 flags(float v)
+{
+    float hi = v >= 0.375 ? 1.0 : 0.0;
+    float lo = (v - 0.502 * hi) >= 0.125 ? 1.0 : 0.0;
+    return float2(lo, hi);
+}
+
+float4 combine(float2 uv, float4 c0, float4 c1, float4 t1, float4 t2, float4 t3, float4 t4,
+               float4 t5, float4 t6, sampler2D tex)
+{
+    float4 t = tex2D(tex, uv);
+    float2 fa = flags(t5.x), fb = flags(t5.y), fc = flags(t5.z), fd = flags(t6.x);
+    float2 ab = flags(t6.y), cd = flags(t6.z);
+    float4 a = float4(t1.xyz + fa.x * t.rgb + fa.y * t.aaa, c1.x + ab.x * t.a);
+    float4 b = float4(t2.xyz + fb.x * t.rgb + fb.y * t.aaa, c1.y + ab.y * t.a);
+    float4 c = float4(t3.xyz + fc.x * t.rgb + fc.y * t.aaa, c1.z + cd.x * t.a);
+    float4 d = float4(t4.xyz + fd.x * t.rgb + fd.y * t.aaa, c1.w + cd.y * t.a);
+    float4 o = saturate((a - b) * c + d);
+    o.rgb = lerp(o.rgb, c0.rgb, c0.a);
+    return o;
+}
+
+float4 main(float4 c0 : COLOR0, float4 c1 : COLOR1, float2 uv : TEXCOORD0,
+            float4 t1 : TEXCOORD1, float4 t2 : TEXCOORD2, float4 t3 : TEXCOORD3,
+            float4 t4 : TEXCOORD4, float4 t5 : TEXCOORD5, float4 t6 : TEXCOORD6,
+            uniform sampler2D tex : TEXUNIT0) : COLOR
+{
+    float a = combine(uv, c0, c1, t1, t2, t3, t4, t5, t6, tex).a;
+    return float4(a, a, a, 1.0);
+}

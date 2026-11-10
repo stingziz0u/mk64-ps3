@@ -151,11 +151,11 @@ void render_armature(Armature* animation, Animation* arg1, s16 timeCycle) {
     } while (animation_type != STOP_ANIMATION);
 }
 
-s16 render_animated_model(Armature* virtualArmature, Animation** virtualListAnimation, s16 animationIndex,
+s16 render_animated_model(Armature* virtualArmature, Animation* PTR32* virtualListAnimation, s16 animationIndex,
                           s16 timeCycle) {
     Armature* armature;
     Animation* animation;
-    Animation** listAnimation;
+    Animation* PTR32* listAnimation;
 
     armature = segmented_to_virtual(virtualArmature);
     listAnimation = segmented_to_virtual(virtualListAnimation);      // Convert the array's address
@@ -171,8 +171,8 @@ s16 render_animated_model(Armature* virtualArmature, Animation** virtualListAnim
     return timeCycle;
 }
 
-s16 get_animation_length(Animation** addr, s16 offset) {
-    Animation** item = segmented_to_virtual(addr);
+s16 get_animation_length(Animation* PTR32* addr, s16 offset) {
+    Animation* PTR32* item = segmented_to_virtual(addr);
     Animation* temp = (Animation*) segmented_to_virtual((void*) item[offset]);
 
     return temp->animation_length - 1;

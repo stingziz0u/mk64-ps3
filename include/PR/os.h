@@ -626,7 +626,7 @@ extern void osSetTLBASID(s32);
 
 /* Address translation routines and macros */
 
-extern u32 osVirtualToPhysical(void*);
+extern uintptr_t osVirtualToPhysical(void*);
 extern void* osPhysicalToVirtual(u32);
 
 #define OS_K0_TO_PHYSICAL(x) (u32)(((char*) (x) - 0x80000000))
@@ -654,10 +654,10 @@ extern u32 osPiGetStatus(void);
 extern s32 osPiGetDeviceType(void);
 extern s32 osPiRawWriteIo(u32, u32);
 extern s32 osPiRawReadIo(u32, u32*);
-extern s32 osPiRawStartDma(s32, u32, void*, u32);
-extern s32 osPiWriteIo(u32, u32);
-extern s32 osPiReadIo(u32, u32*);
-extern s32 osPiStartDma(OSIoMesg*, s32, s32, u32, void*, u32, OSMesgQueue*);
+extern s32 osPiRawStartDma(s32, u32, void*, size_t);
+extern s32 osPiWriteIo(uintptr_t, u32);
+extern s32 osPiReadIo(uintptr_t, u32*);
+extern s32 osPiStartDma(OSIoMesg*, s32, s32, uintptr_t, void*, size_t, OSMesgQueue*);
 extern void osCreatePiManager(OSPri, OSMesgQueue*, OSMesg*, s32);
 
 /* Video interface (Vi) */
@@ -738,7 +738,7 @@ extern OSPiHandle* osDriveRomInit(void);
 extern s32 osEPiDeviceType(OSPiHandle*, OSPiInfo*);
 extern s32 osEPiRawWriteIo(OSPiHandle*, u32, u32);
 extern s32 osEPiRawReadIo(OSPiHandle*, u32, u32*);
-extern s32 osEPiRawStartDma(OSPiHandle*, s32, u32, void*, u32);
+extern s32 osEPiRawStartDma(OSPiHandle*, s32, u32, void*, size_t);
 extern s32 osEPiWriteIo(OSPiHandle*, u32, u32);
 extern s32 osEPiReadIo(OSPiHandle*, u32, u32*);
 extern s32 osEPiStartDma(OSPiHandle*, OSIoMesg*, s32);
@@ -762,7 +762,7 @@ extern void osAckRamromWrite(void);
 /* byte string operations */
 
 extern void bcopy(const void*, void*, size_t);
-extern int bcmp(const void*, const void*, int);
+extern int bcmp(const void*, const void*, size_t);
 extern void bzero(void*, size_t);
 
 /* Miscellaneous operations */

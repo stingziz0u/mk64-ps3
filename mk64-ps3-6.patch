@@ -1,0 +1,196 @@
+diff --git a/ps3/Makefile b/ps3/Makefile
+index c17bca8..cfd51aa 100644
+--- a/ps3/Makefile
++++ b/ps3/Makefile
+@@ -40,7 +40,7 @@ CC := ppu-gcc
+ LD := ppu-gcc
+ 
+ # Goes up by one with every patch; first line of the log and VERSION.TXT.
+-PATCHLEVEL := 5
++PATCHLEVEL := 6
+ VERSION    := stage2
+ OUT_PKG    := mk64-ps3-$(VERSION).pkg
+ 
+diff --git a/ps3/hosttest/host_rsx.c b/ps3/hosttest/host_rsx.c
+index cc7ca9f..3e37e14 100644
+--- a/ps3/hosttest/host_rsx.c
++++ b/ps3/hosttest/host_rsx.c
+@@ -261,3 +261,9 @@ void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n)
+                q->wrgb[6] > 0, q->wrgb[7] > 0, q->wa[0] > 0, q->wa[1] > 0, q->wa[2] > 0, q->wa[3] > 0, q->fog[3]);
+     }
+ }
++
++/* Diagnostics of ps3_rsx.h: not used by the host test. */
++void PS3_Rsx_SetDebug(int mode) { (void)mode; }
++int  PS3_Rsx_GetDebug(void) { return 0; }
++const char *PS3_Rsx_DebugName(int mode) { (void)mode; return "normal"; }
++void PS3_Rsx_LogNextFrame(void) {}
+diff --git a/ps3/source/game/ps3_game.c b/ps3/source/game/ps3_game.c
+index 7e73871..69ae364 100644
+--- a/ps3/source/game/ps3_game.c
++++ b/ps3/source/game/ps3_game.c
+@@ -16,6 +16,7 @@
+ #include "ps3_gfx_walk.h"
+ #include "ps3_plat.h"
+ #include "ps3_pad_bits.h"
++#include "ps3_rsx.h"
+ 
+ #define VBLANK_US 16683ULL                /* 59.94 Hz */
+ 
+@@ -63,6 +64,25 @@ void ps3_frame_end(void) {
+ 
+     PS3_Plat_Pump();
+     PS3_Plat_Pad(0, &pad);
++    {
++        /* Diagnostics: R3 cycles the render mode, L3 logs the next frame. */
++        static unsigned prev;
++        unsigned pressed = pad.buttons & ~prev;
++
++        prev = pad.buttons;
++        if (pressed & PS3PAD_R3) {
++            int m = (PS3_Rsx_GetDebug() + 1) % PS3_RDBG_COUNT;
++
++            PS3_Rsx_SetDebug(m);
++            ps3_logf("[debug] frame %u: render mode %d, \"%s\"", gPs3GfxStats.frame, m, PS3_Rsx_DebugName(m));
++        }
++        if (pressed & PS3PAD_L3) {
++            ps3_logf("[debug] frame %u: L3, logging the draws of the next frame (state %d, menu %d)",
++                     gPs3GfxStats.frame, (int) gGamestate, (int) gMenuSelection);
++            log_frame("L3");
++            PS3_Rsx_LogNextFrame();
++        }
++    }
+     if (PS3_Plat_ExitRequested() ||
+         ((pad.buttons & PS3PAD_SELECT) && (pad.buttons & PS3PAD_START))) {
+         ps3_logf("[game] quitting at frame %u", gPs3GfxStats.frame);
+diff --git a/ps3/source/game/ps3_gfx.c b/ps3/source/game/ps3_gfx.c
+index b83b7fd..19858cf 100644
+--- a/ps3/source/game/ps3_gfx.c
++++ b/ps3/source/game/ps3_gfx.c
+@@ -800,7 +800,7 @@ static void tri(int i0, int i1, int i2) {
+         gPs3GfxStats.culledClip++;
+         return;                                       /* all three outside the same plane */
+     }
+-    if (rsp.geometryMode & G_CULL_BOTH) {
++    if ((rsp.geometryMode & G_CULL_BOTH) && PS3_Rsx_GetDebug() != PS3_RDBG_NO_CULL) {
+         /* Facing from the homogeneous determinant of (x, y, w): its sign is
+          * the winding of what is left on screen after clipping, also when a
+          * vertex is behind the camera (dividing by w first gets that wrong,
+diff --git a/ps3/source/ps3_rsx.c b/ps3/source/ps3_rsx.c
+index b501dfe..e34e9ed 100644
+--- a/ps3/source/ps3_rsx.c
++++ b/ps3/source/ps3_rsx.c
+@@ -78,6 +78,28 @@ static int s_tex_dirty = 0;
+ static u32 s_frames = 0;
+ static u32 s_draws = 0, s_verts = 0;
+ 
++static int s_dbg = 0;           /* PS3_RDBG_* */
++static int s_log_next = 0;      /* L3 pressed: log the next frame */
++static int s_logging = 0;       /* logging this frame */
++
++void PS3_Rsx_SetDebug(int mode) { s_dbg = mode; s_cur_valid = 0; }
++int  PS3_Rsx_GetDebug(void) { return s_dbg; }
++void PS3_Rsx_LogNextFrame(void) { s_log_next = 1; }
++
++const char *PS3_Rsx_DebugName(int mode)
++{
++    switch (mode) {
++    case PS3_RDBG_NORMAL:        return "normal";
++    case PS3_RDBG_NO_ALPHA_TEST: return "no alpha test";
++    case PS3_RDBG_NO_DEPTH:      return "no depth test";
++    case PS3_RDBG_NO_BLEND:      return "no blending";
++    case PS3_RDBG_NO_TEXTURE:    return "no textures (white)";
++    case PS3_RDBG_NO_SCISSOR:    return "no scissor";
++    case PS3_RDBG_NO_CULL:       return "no backface culling";
++    default:                     return "?";
++    }
++}
++
+ /* Game area on the output, in pixels. */
+ static u32 s_vx, s_vy, s_vw, s_vh;
+ 
+@@ -244,6 +266,10 @@ void PS3_Rsx_BeginFrame(void)
+                  (unsigned)(s_tex_bytes / 1024), s_npending);
+     s_draws = 0;
+     s_verts = 0;
++    s_logging = s_log_next;
++    s_log_next = 0;
++    if (s_logging)
++        ps3_logf("[draw] ---- frame %u, mode \"%s\" ----", (unsigned)s_frames, PS3_Rsx_DebugName(s_dbg));
+ }
+ 
+ void PS3_Rsx_EndFrame(void)
+@@ -272,9 +298,22 @@ static u32 wrap_mode(int w)
+            w == PS3_WRAP_MIRROR ? GCM_TEXTURE_MIRRORED_REPEAT : GCM_TEXTURE_REPEAT;
+ }
+ 
+-static void apply_state(gcmContextData *ctx, const ps3_rstate_t *st)
++static void apply_state(gcmContextData *ctx, const ps3_rstate_t *st_in)
+ {
+-    ps3_rtex_t *tex = st->tex ? st->tex : s_white;
++    ps3_rstate_t dbg = *st_in;
++    const ps3_rstate_t *st = &dbg;
++    ps3_rtex_t *tex;
++
++    switch (s_dbg) {
++    case PS3_RDBG_NO_ALPHA_TEST: dbg.alpha_ref = 0; break;
++    case PS3_RDBG_NO_DEPTH:      dbg.depth_test = 0; dbg.depth_write = 0; dbg.decal = 0; break;
++    case PS3_RDBG_NO_BLEND:      dbg.blend = 0; break;
++    case PS3_RDBG_NO_TEXTURE:    dbg.tex = NULL; break;
++    case PS3_RDBG_NO_SCISSOR:    dbg.sx = 0; dbg.sy = 0; dbg.sw = PS3_SCREEN_W; dbg.sh = PS3_SCREEN_H; break;
++    default: break;
++    }
++    tex = st->tex ? st->tex : s_white;
++
+     ps3_rtex_t *cur_tex = s_cur.tex ? s_cur.tex : s_white;
+ 
+     if (s_cur_valid && memcmp(st, &s_cur, sizeof(*st)) == 0)
+@@ -384,6 +423,21 @@ void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n)
+ 
+     rsxDrawVertexArray(ctx, GCM_TYPE_TRIANGLES, 0, (u32)n);
+ 
++    if (s_logging) {
++        const ps3_rvert_t *q = &v[0];
++        ps3_logf("[draw] %3u n=%-4d tex %dx%d%s blend %d zt %d zw %d decal %d aref %u sc %d,%d %dx%d wrap %d,%d | "
++                 "v0 %.1f %.1f %.1f %.1f uv %.3f %.3f A %02x%02x%02x%02x B %02x%02x%02x%02x C %02x%02x%02x%02x "
++                 "D %02x%02x%02x%02x w %02x%02x%02x%02x%02x%02x%02x%02x wa %02x%02x%02x%02x fog %02x",
++                 (unsigned)s_draws, n, st->tex ? st->tex->w : 0, st->tex ? st->tex->h : 0,
++                 st->tex ? (st->tex->swz ? "s" : "l") : "-", st->blend, st->depth_test, st->depth_write,
++                 st->decal, st->alpha_ref, st->sx, st->sy, st->sw, st->sh, st->wrap_s, st->wrap_t,
++                 q->x, q->y, q->z, q->w, q->u, q->v,
++                 q->c[0][0], q->c[0][1], q->c[0][2], q->c[0][3], q->c[1][0], q->c[1][1], q->c[1][2], q->c[1][3],
++                 q->c[2][0], q->c[2][1], q->c[2][2], q->c[2][3], q->c[3][0], q->c[3][1], q->c[3][2], q->c[3][3],
++                 q->wrgb[0], q->wrgb[1], q->wrgb[2], q->wrgb[3], q->wrgb[4], q->wrgb[5], q->wrgb[6], q->wrgb[7],
++                 q->wa[0], q->wa[1], q->wa[2], q->wa[3], q->fog[3]);
++    }
++
+     s_draws++;
+     s_verts += (u32)n;
+     if (s_frames == 1 && s_draws == 1)
+diff --git a/ps3/source/ps3_rsx.h b/ps3/source/ps3_rsx.h
+index 773dc59..f3215be 100644
+--- a/ps3/source/ps3_rsx.h
++++ b/ps3/source/ps3_rsx.h
+@@ -75,4 +75,22 @@ void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n);
+ /* Clears the whole depth buffer. */
+ void PS3_Rsx_ClearDepth(void);
+ 
++/* Diagnostics (R3 cycles the mode, L3 logs every draw of the next frame).
++ * Each mode switches one part of the pipeline off, to find which one hides
++ * something on the console. */
++enum {
++    PS3_RDBG_NORMAL = 0,
++    PS3_RDBG_NO_ALPHA_TEST,
++    PS3_RDBG_NO_DEPTH,
++    PS3_RDBG_NO_BLEND,
++    PS3_RDBG_NO_TEXTURE,        /* texture replaced by white */
++    PS3_RDBG_NO_SCISSOR,
++    PS3_RDBG_NO_CULL,           /* handled by the interpreter */
++    PS3_RDBG_COUNT
++};
++void PS3_Rsx_SetDebug(int mode);
++int  PS3_Rsx_GetDebug(void);
++const char *PS3_Rsx_DebugName(int mode);
++void PS3_Rsx_LogNextFrame(void);
++
+ #endif /* PS3_RSX_H */

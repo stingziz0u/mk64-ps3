@@ -234,10 +234,20 @@ typedef struct {
  * Generic Acmd Packet
  */
 
+#ifdef TARGET_PS3
+/* Exactly 64 bits, as on the N64 (see PTR32 in ultratypes.h): the synthesis
+ * code steps through command lists both as Acmd* and as u64*. Addresses fit
+ * in 32 bits on the PS3. */
+typedef struct {
+    unsigned int w0;
+    unsigned int w1;
+} Awords;
+#else
 typedef struct {
     uintptr_t w0;
     uintptr_t w1;
 } Awords;
+#endif
 
 typedef union {
     Awords words;

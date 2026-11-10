@@ -417,18 +417,18 @@ void func_800BB584(s32 bankId) {
     // wtf is up with the `gCtlEntries[bankId].instruments - 1` stuff?
     patch_audio_bank((struct AudioBank*) (gCtlEntries[bankId].instruments - 1), var_a1,
                      gCtlEntries[bankId].numInstruments, gCtlEntries[bankId].numDrums);
-    gCtlEntries[bankId].drums = (struct Drum**) *(gCtlEntries[bankId].instruments - 1);
+    gCtlEntries[bankId].drums = (struct Drum* PTR32*) *(gCtlEntries[bankId].instruments - 1);
 }
 
 void patch_audio_bank(struct AudioBank* mem, u8* offset, u32 numInstruments, u32 numDrums) {
     struct Instrument* instrument;
-    struct Instrument** itInstrs;
-    struct Instrument** end;
+    struct Instrument* PTR32* itInstrs;
+    struct Instrument* PTR32* end;
     struct AudioBank* temp;
     u32 i;
     void* patched;
     struct Drum* drum;
-    struct Drum** drums;
+    struct Drum* PTR32* drums;
     u32 numDrums2;
 
 #define BASE_OFFSET_REAL(x, base) (void*) ((uintptr_t) (x) + (uintptr_t) base)
@@ -460,7 +460,7 @@ void patch_audio_bank(struct AudioBank* mem, u8* offset, u32 numInstruments, u32
     temp = &*mem;
     if (numInstruments > 0) {
         //! Doesn't affect EU, but required for US/JP
-        struct Instrument** tempInst;
+        struct Instrument* PTR32* tempInst;
         itInstrs = temp->instruments;
         tempInst = temp->instruments;
         end = numInstruments + tempInst;

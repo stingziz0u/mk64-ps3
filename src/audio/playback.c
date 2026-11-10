@@ -166,7 +166,12 @@ struct Drum* get_drum(s32 bankId, s32 drumId) {
         return NULL;
     }
 
+#ifdef TARGET_PS3
+    // The N64 checks for a KSEG0 address; PS3 memory is below 0x80000000.
+    if (gCtlEntries[bankId].drums == NULL) {
+#else
     if ((uintptr_t) gCtlEntries[bankId].drums < 0x80000000U) {
+#endif
         stubbed_printf("Audio: voiceman: Percussion table pointer (bank %d) is irregular.\n");
         return NULL;
     }
@@ -225,7 +230,8 @@ void process_notes(void) {
         note = &gNotes[i];
         playbackState = (struct NotePlaybackState*) &note->priority;
         if (note->parentLayer != NO_LAYER) {
-#ifndef NO_SEGMENTED_MEMORY
+#if !defined(NO_SEGMENTED_MEMORY) && !defined(TARGET_PS3)
+            // (PS3: memory is below 0x80000000, this would skip every note)
             if ((uintptr_t) playbackState->parentLayer < 0x7fffffffU) {
                 continue;
             }

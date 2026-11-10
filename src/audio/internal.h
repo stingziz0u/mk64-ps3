@@ -129,17 +129,19 @@ struct AdpcmBook {
     s16 book[1]; // size 8 * order * npredictors. 8-byte aligned
 };
 
+// PS3: the structures below up to AudioBank are read straight from the ROM
+// (the sound banks), so their pointers are 32-bit there too. See PTR32.
 struct AudioBankSample {
     u8 unused;
     u8 loaded;
-    u8* sampleAddr;
-    struct AdpcmLoop* loop;
-    struct AdpcmBook* book;
+    u8* PTR32 sampleAddr;
+    struct AdpcmLoop* PTR32 loop;
+    struct AdpcmBook* PTR32 book;
     u32 sampleSize; // never read. either 0 or 1 mod 9, depending on padding
 };
 
 struct AudioBankSound {
-    struct AudioBankSample* sample;
+    struct AudioBankSample* PTR32 sample;
     f32 tuning; // frequency scale factor
 }; // size = 0x8
 
@@ -148,7 +150,7 @@ struct Instrument {
     /*0x01*/ u8 normalRangeLo;
     /*0x02*/ u8 normalRangeHi;
     /*0x03*/ u8 releaseRate;
-    /*0x04*/ struct AdsrEnvelope* envelope;
+    /*0x04*/ struct AdsrEnvelope* PTR32 envelope;
     /*0x08*/ struct AudioBankSound lowNotesSound;
     /*0x10*/ struct AudioBankSound normalNotesSound;
     /*0x18*/ struct AudioBankSound highNotesSound;
@@ -159,20 +161,20 @@ struct Drum {
     /*0x01*/ u8 pan;
     /*0x02*/ u8 loaded;
     struct AudioBankSound sound;
-    struct AdsrEnvelope* envelope;
+    struct AdsrEnvelope* PTR32 envelope;
 };
 
 struct AudioBank {
-    struct Drum** drums;
-    struct Instrument* instruments[1];
+    struct Drum* PTR32* PTR32 drums;
+    struct Instrument* PTR32 instruments[1];
 }; // dynamic size
 
 struct CtlEntry {
     u8 unused;
     u8 numInstruments;
     u8 numDrums;
-    struct Instrument** instruments;
-    struct Drum** drums;
+    struct Instrument* PTR32* instruments;
+    struct Drum* PTR32* drums;
 }; // size = 0xC
 
 struct M64ScriptState {
@@ -426,8 +428,8 @@ struct NoteSubEu {
     /*0x08*/ u16 targetVolRight;           // UQ0.12 (EU UQ0.10)
     /*0x0A*/ u16 resamplingRateFixedPoint; // stored as signed but loaded as u16
     /*0x0C*/ union {
-        s16* samples;
-        struct AudioBankSound* audioBankSound;
+        s16* PTR32 samples;            // PTR32: the arrays of these are sized for 16 bytes
+        struct AudioBankSound* PTR32 audioBankSound;
     } sound;
 };
 struct Note {
@@ -443,7 +445,13 @@ struct Note {
     u8 pad0[12];
 #endif
 
+#ifdef TARGET_PS3
+    // PS3: aligned like struct NotePlaybackState itself, so that the members
+    // below keep the same offsets as in it (64-bit pointers). Checked below.
+    /*0x04, 0x30, 0x30*/ u8 priority __attribute__((aligned(8)));
+#else
     /*0x04, 0x30, 0x30*/ u8 priority;
+#endif
     /*      0x31, 0x31*/ u8 waveId;
     /*      0x32, 0x32*/ u8 sampleCountIndex;
     /*0x08, 0x34, 0x36*/ s16 adsrVolScale;
@@ -459,6 +467,19 @@ struct Note {
     u8 pad3[8];
     /*    , 0xB0, 0xB4*/ struct NoteSubEu noteSubEu;
 }; // size = 0xC0, known to be 0xC8 on SH
+
+#ifdef TARGET_PS3
+#include <stddef.h>
+#define NOTE_PB_SAME(m) \
+    (offsetof(struct Note, m) - offsetof(struct Note, priority) == offsetof(struct NotePlaybackState, m))
+typedef char note_playback_layout_check[(NOTE_PB_SAME(adsrVolScale) && NOTE_PB_SAME(portamentoFreqScale) &&
+                                         NOTE_PB_SAME(prevParentLayer) && NOTE_PB_SAME(parentLayer) &&
+                                         NOTE_PB_SAME(wantedParentLayer) && NOTE_PB_SAME(attributes) &&
+                                         NOTE_PB_SAME(adsr) && NOTE_PB_SAME(portamento) &&
+                                         NOTE_PB_SAME(vibratoState))
+                                            ? 1
+                                            : -1];
+#endif
 
 // While this struct needs to be size 0xA0, its not clear
 // what innards are necessary. All the possible options from

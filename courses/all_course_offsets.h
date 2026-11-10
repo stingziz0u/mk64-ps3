@@ -3,17 +3,17 @@
 
 #include "course_offsets.h"
 
-extern Gfx* banshee_boardwalk_dls[];
-extern Gfx* bowsers_castle_dls[];
-extern Gfx* choco_mountain_dls[];
-extern Gfx* kalimari_desert_dls[];
-extern Gfx* luigi_raceway_dls[];
-extern Gfx* mario_raceway_dls[];
-extern Gfx* moo_moo_farm_dls[];
-extern Gfx* royal_raceway_dls[];
-extern Gfx* sherbet_land_dls[];
-extern Gfx* sherbet_land_dls_2[];
-extern Gfx* wario_stadium_dls[];
+extern Gfx* PTR32 banshee_boardwalk_dls[];
+extern Gfx* PTR32 bowsers_castle_dls[];
+extern Gfx* PTR32 choco_mountain_dls[];
+extern Gfx* PTR32 kalimari_desert_dls[];
+extern Gfx* PTR32 luigi_raceway_dls[];
+extern Gfx* PTR32 mario_raceway_dls[];
+extern Gfx* PTR32 moo_moo_farm_dls[];
+extern Gfx* PTR32 royal_raceway_dls[];
+extern Gfx* PTR32 sherbet_land_dls[];
+extern Gfx* PTR32 sherbet_land_dls_2[];
+extern Gfx* PTR32 wario_stadium_dls[];
 
 extern Gfx toads_turnpike_dl_0[];
 extern Gfx toads_turnpike_dl_1[];

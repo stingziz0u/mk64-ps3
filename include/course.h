@@ -11,7 +11,7 @@
  */
 
 typedef struct {
-    Gfx* addr;
+    Gfx* PTR32 addr;
     u8 surfaceType;
     u8 sectionId;
     u16 flags;

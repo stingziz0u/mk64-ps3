@@ -90,6 +90,40 @@ void* get_next_available_memory_addr(uintptr_t size) {
  * @param addr A pointer containing the physical memory address of the data.
  * @return The stored base address, truncated to a 29-bit value.
  */
+#ifdef TARGET_PS3
+/**
+ * PS3: entries 1..15 are the game's segments. Entries 0 and 16..255 hold
+ * `index << 24`, so `gSegmentTable[addr >> 24] + (addr & 0xFFFFFF)` gives back
+ * a real pointer unchanged. No PS3 memory lives in 0x01000000..0x0FFFFFFF
+ * (code is below 16 MB, data at 0x10000000, heap at 0x50000000 and up).
+ * A game segment with no base yet points at gPs3LowRam (ps3_romdata.c).
+ */
+void ps3_init_segment_table(void) {
+    s32 i;
+
+    for (i = 0; i < 256; i++) {
+        gSegmentTable[i] = (i >= 1 && i <= 15) ? (uintptr_t) gPs3LowRam : ((uintptr_t) i << 24);
+    }
+}
+
+uintptr_t set_segment_base_addr(s32 segment, void* addr) {
+    if (segment >= 1 && segment <= 15) {
+        gSegmentTable[segment] = (uintptr_t) addr;
+    }
+    return gSegmentTable[segment];
+}
+
+void* get_segment_base_addr(s32 segment) {
+    return (void*) gSegmentTable[segment];
+}
+
+void* segmented_to_virtual(const void* addr) {
+    size_t segment = ((uintptr_t) addr >> 24) & 0xFF;
+    size_t offset = (uintptr_t) addr & 0x00FFFFFF;
+
+    return (void*) (gSegmentTable[segment] + offset);
+}
+#else
 uintptr_t set_segment_base_addr(s32 segment, void* addr) {
     gSegmentTable[segment] = (uintptr_t) addr & 0x1FFFFFFF;
     return gSegmentTable[segment];
@@ -112,6 +146,7 @@ void* segmented_to_virtual(const void* addr) {
 
     return (void*) ((gSegmentTable[segment] + offset) | 0x80000000);
 }
+#endif
 
 void move_segment_table_to_dmem(void) {
     s32 i;
@@ -1299,10 +1334,18 @@ void displaylist_unpack(uintptr_t* data, uintptr_t finalDisplaylistOffset, u32 a
 }
 
 struct UnkStr_802AA7C8 {
+#ifdef TARGET_PS3
+    // Same as course_texture (include/course_offsets.h): a table in the ROM.
+    u8* PTR32 unk0;
+    u32 unk4;
+    u32 unk8;
+    u32 unkC;
+#else
     u8* unk0;
     uintptr_t unk4;
     uintptr_t unk8;
     uintptr_t unkC;
+#endif
 };
 
 void decompress_textures(u32* arg0) {

@@ -1,0 +1,24 @@
+# PS3 build output
+ps3/build/
+ps3/gen/
+ps3/pkgfiles/
+ps3/pkgfiles-test/
+ps3/*.pkg
+ps3/*.self
+ps3/*.fake.self
+ps3/*.elf
+ps3/*.sfo
+ps3/*.log
+
+# Game data: never in the repo (the user's own ROM)
+*.z64
+*.n64
+*.v64
+*.eep
+*.mpk
+
+# Local test output
+*.ppm
+*.wav
+*.mp3
+log*.txt

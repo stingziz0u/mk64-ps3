@@ -1,0 +1,30 @@
+diff --git a/ps3/Makefile b/ps3/Makefile
+index db82a4a..99f6e3d 100644
+--- a/ps3/Makefile
++++ b/ps3/Makefile
+@@ -41,7 +41,7 @@ CC := ppu-gcc
+ LD := ppu-gcc
+ 
+ # Goes up by one with every patch; first line of the log and VERSION.TXT.
+-PATCHLEVEL := 2
++PATCHLEVEL := 3
+ VERSION    := stage1
+ OUT_PKG    := mk64-ps3-$(VERSION).pkg
+ 
+diff --git a/src/main.c b/src/main.c
+index 545305f..4ea9d3c 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -565,7 +565,12 @@ void setup_game_memory(void) {
+                  &gDmaMesgQueue);
+     osRecvMesg(&gDmaMesgQueue, &gMainReceivedMesg, OS_MESG_BLOCK);
+ 
++#ifdef TARGET_PS3
++    // The size in the MIO0 header is a 32-bit field.
++    textureSegSize = *(u32*) (textureSegStart + 4);
++#else
+     textureSegSize = *(uintptr_t*) (textureSegStart + 4);
++#endif
+     textureSegSize = ALIGN16(textureSegSize);
+     allocatedMemory = gNextFreeMemoryAddress;
+     mio0decode((u8*) textureSegStart, (u8*) allocatedMemory);

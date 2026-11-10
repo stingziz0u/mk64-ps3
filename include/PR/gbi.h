@@ -1681,10 +1681,22 @@ typedef struct {
 /*
  * Generic Gfx Packet
  */
+#ifdef TARGET_PS3
+/* Exactly 64 bits, as on the N64: see PTR32 in ultratypes.h. w1 is a pointer
+ * type so that static display lists can hold addresses (the linker fills them
+ * in with 32-bit relocations). */
+typedef struct {
+    unsigned int w0;
+    void* PTR32 w1;
+} Gwords;
+#define GBI_W1(x) ((void*) (uintptr_t) (x))
+#else
 typedef struct {
     uintptr_t w0;
     uintptr_t w1;
 } Gwords;
+#define GBI_W1(x) ((uintptr_t) (x))
+#endif
 
 /*
  * This union is the fundamental type of the display list.
@@ -1731,12 +1743,12 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);                                   \
                                                                   \
         _g->words.w0 = _SHIFTL((c), 24, 8) | _SHIFTL((l), 0, 24); \
-        _g->words.w1 = (uintptr_t) (s);                           \
+        _g->words.w1 = GBI_W1(s);                           \
     }
 
 #define gsDma0p(c, s, l)                                               \
     {                                                                  \
-        { _SHIFTL((c), 24, 8) | _SHIFTL((l), 0, 24), (uintptr_t) (s) } \
+        { _SHIFTL((c), 24, 8) | _SHIFTL((l), 0, 24), GBI_W1(s) } \
     }
 
 #define gDma1p(pkt, c, s, l, p)                                                           \
@@ -1744,12 +1756,12 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);                                                           \
                                                                                           \
         _g->words.w0 = (_SHIFTL((c), 24, 8) | _SHIFTL((p), 16, 8) | _SHIFTL((l), 0, 16)); \
-        _g->words.w1 = (uintptr_t) (s);                                                   \
+        _g->words.w1 = GBI_W1(s);                                                   \
     }
 
 #define gsDma1p(c, s, l, p)                                                                    \
     {                                                                                          \
-        { (_SHIFTL((c), 24, 8) | _SHIFTL((p), 16, 8) | _SHIFTL((l), 0, 16)), (uintptr_t) (s) } \
+        { (_SHIFTL((c), 24, 8) | _SHIFTL((p), 16, 8) | _SHIFTL((l), 0, 16)), GBI_W1(s) } \
     }
 
 #define gDma2p(pkt, c, adrs, len, idx, ofs)                                                                            \
@@ -1757,13 +1769,13 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);                                                                                        \
         _g->words.w0 =                                                                                                 \
             (_SHIFTL((c), 24, 8) | _SHIFTL(((len) - 1) / 8, 19, 5) | _SHIFTL((ofs) / 8, 8, 8) | _SHIFTL((idx), 0, 8)); \
-        _g->words.w1 = (uintptr_t) (adrs);                                                                             \
+        _g->words.w1 = GBI_W1(adrs);                                                                             \
     }
 #define gsDma2p(c, adrs, len, idx, ofs)                                                                                \
     {                                                                                                                  \
         {                                                                                                              \
             (_SHIFTL((c), 24, 8) | _SHIFTL(((len) - 1) / 8, 19, 5) | _SHIFTL((ofs) / 8, 8, 8) | _SHIFTL((idx), 0, 8)), \
-                (uintptr_t) (adrs)                                                                                     \
+                GBI_W1(adrs)                                                                                     \
         }                                                                                                              \
     }
 
@@ -1792,11 +1804,11 @@ typedef union {
     {                                                                                           \
         Gfx* _g = (Gfx*) (pkt);                                                                 \
         _g->words.w0 = _SHIFTL(G_VTX, 24, 8) | _SHIFTL((n), 12, 8) | _SHIFTL((v0) + (n), 1, 7); \
-        _g->words.w1 = (uintptr_t) (v);                                                         \
+        _g->words.w1 = GBI_W1(v);                                                         \
     }
 #define gsSPVertex(v, n, v0)                                                                           \
     {                                                                                                  \
-        { (_SHIFTL(G_VTX, 24, 8) | _SHIFTL((n), 12, 8) | _SHIFTL((v0) + (n), 1, 7)), (uintptr_t) (v) } \
+        { (_SHIFTL(G_VTX, 24, 8) | _SHIFTL((n), 12, 8) | _SHIFTL((v0) + (n), 1, 7)), GBI_W1(v) } \
     }
 #elif (defined(F3DEX_GBI) || defined(F3DLP_GBI))
 /*
@@ -1852,12 +1864,12 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);             \
                                             \
         _g->words.w0 = _SHIFTL((c), 24, 8); \
-        _g->words.w1 = (uintptr_t) (p0);    \
+        _g->words.w1 = GBI_W1(p0);    \
     }
 
 #define gsImmp1(c, p0)                            \
     {                                             \
-        { _SHIFTL((c), 24, 8), (uintptr_t) (p0) } \
+        { _SHIFTL((c), 24, 8), GBI_W1(p0) } \
     }
 
 #define gImmp2(pkt, c, p0, p1)                                      \
@@ -1891,12 +1903,12 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);                                                            \
                                                                                            \
         _g->words.w0 = (_SHIFTL((c), 24, 8) | _SHIFTL((p0), 8, 16) | _SHIFTL((p1), 0, 8)); \
-        _g->words.w1 = (uintptr_t) (dat);                                                  \
+        _g->words.w1 = GBI_W1(dat);                                                  \
     }
 
 #define gsImmp21(c, p0, p1, dat)                                                                \
     {                                                                                           \
-        { _SHIFTL((c), 24, 8) | _SHIFTL((p0), 8, 16) | _SHIFTL((p1), 0, 8), (uintptr_t) (dat) } \
+        { _SHIFTL((c), 24, 8) | _SHIFTL((p0), 8, 16) | _SHIFTL((p1), 0, 8), GBI_W1(dat) } \
     }
 
 #ifdef F3DEX_GBI_2
@@ -2313,7 +2325,7 @@ typedef union {
     {                                                                                                         \
         Gfx* _g = (Gfx*) (pkt);                                                                               \
         _g->words.w0 = _SHIFTL(G_RDPHALF_1, 24, 8);                                                           \
-        _g->words.w1 = (uintptr_t) (dl);                                                                      \
+        _g->words.w1 = GBI_W1(dl);                                                                      \
         _g = (Gfx*) (pkt);                                                                                    \
         _g->words.w0 = (_SHIFTL(G_BRANCH_Z, 24, 8) | _SHIFTL((vtx) * 5, 12, 12) | _SHIFTL((vtx) * 2, 0, 12)); \
         _g->words.w1 = G_DEPTOZSrg(zval, near, far, flag, zmin, zmax);                                        \
@@ -2322,7 +2334,7 @@ typedef union {
 #define gsSPBranchLessZrg(dl, vtx, zval, near, far, flag, zmin, zmax)                            \
     { {                                                                                          \
         _SHIFTL(G_RDPHALF_1, 24, 8),                                                             \
-        (uintptr_t) (dl),                                                                        \
+        GBI_W1(dl),                                                                        \
     } },                                                                                         \
     {                                                                                            \
         {                                                                                        \
@@ -2346,7 +2358,7 @@ typedef union {
     {                                                                                                         \
         Gfx* _g = (Gfx*) (pkt);                                                                               \
         _g->words.w0 = _SHIFTL(G_RDPHALF_1, 24, 8);                                                           \
-        _g->words.w1 = (uintptr_t) (dl);                                                                      \
+        _g->words.w1 = GBI_W1(dl);                                                                      \
         _g = (Gfx*) (pkt);                                                                                    \
         _g->words.w0 = (_SHIFTL(G_BRANCH_Z, 24, 8) | _SHIFTL((vtx) * 5, 12, 12) | _SHIFTL((vtx) * 2, 0, 12)); \
         _g->words.w1 = (unsigned int) (zval);                                                                 \
@@ -2355,7 +2367,7 @@ typedef union {
 #define gsSPBranchLessZraw(dl, vtx, zval)                                                        \
     { {                                                                                          \
         _SHIFTL(G_RDPHALF_1, 24, 8),                                                             \
-        (uintptr_t) (dl),                                                                        \
+        GBI_W1(dl),                                                                        \
     } },                                                                                         \
     {                                                                                            \
         {                                                                                        \
@@ -2374,19 +2386,19 @@ typedef union {
     {                                                                                         \
         Gfx* _g = (Gfx*) (pkt);                                                               \
         _g->words.w0 = _SHIFTL(G_RDPHALF_1, 24, 8);                                           \
-        _g->words.w1 = (uintptr_t) (uc_dstart);                                               \
+        _g->words.w1 = GBI_W1(uc_dstart);                                               \
         _g = (Gfx*) (pkt);                                                                    \
         _g->words.w0 = (_SHIFTL(G_LOAD_UCODE, 24, 8) | _SHIFTL((int) (uc_dsize) - 1, 0, 16)); \
-        _g->words.w1 = (uintptr_t) (uc_start);                                                \
+        _g->words.w1 = GBI_W1(uc_start);                                                \
     }
 
 #define gsSPLoadUcodeEx(uc_start, uc_dstart, uc_dsize)                                                   \
     { {                                                                                                  \
         _SHIFTL(G_RDPHALF_1, 24, 8),                                                                     \
-        (uintptr_t) (uc_dstart),                                                                         \
+        GBI_W1(uc_dstart),                                                                         \
     } },                                                                                                 \
     {                                                                                                    \
-        { _SHIFTL(G_LOAD_UCODE, 24, 8) | _SHIFTL((int) (uc_dsize) - 1, 0, 16), (uintptr_t) (uc_start), } \
+        { _SHIFTL(G_LOAD_UCODE, 24, 8) | _SHIFTL((int) (uc_dsize) - 1, 0, 16), GBI_W1(uc_start), } \
     }
 
 #define gSPLoadUcode(pkt, uc_start, uc_dstart) gSPLoadUcodeEx((pkt), (uc_start), (uc_dstart), SP_UCODE_DATA_SIZE)
@@ -2407,7 +2419,7 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);                                                                          \
         _g->words.w0 = _SHIFTL(G_DMA_IO, 24, 8) | _SHIFTL((flag), 23, 1) | _SHIFTL((dmem) / 8, 13, 10) | \
                        _SHIFTL((size) - 1, 0, 12);                                                       \
-        _g->words.w1 = (uintptr_t) (dram);                                                               \
+        _g->words.w1 = GBI_W1(dram);                                                               \
     }
 
 #define gsSPDma_io(flag, dmem, dram, size)                                                    \
@@ -2415,7 +2427,7 @@ typedef union {
         {                                                                                     \
             _SHIFTL(G_DMA_IO, 24, 8) | _SHIFTL((flag), 23, 1) | _SHIFTL((dmem) / 8, 13, 10) | \
                 _SHIFTL((size) - 1, 0, 12),                                                   \
-                (uintptr_t) (dram)                                                            \
+                GBI_W1(dram)                                                            \
         }                                                                                     \
     }
 
@@ -2911,14 +2923,14 @@ typedef union {
         Gfx* _g = (Gfx*) (pkt);                                                                                       \
                                                                                                                       \
         _g->words.w0 = _SHIFTL(cmd, 24, 8) | _SHIFTL(fmt, 21, 3) | _SHIFTL(siz, 19, 2) | _SHIFTL((width) - 1, 0, 12); \
-        _g->words.w1 = (uintptr_t) (i);                                                                               \
+        _g->words.w1 = GBI_W1(i);                                                                               \
     }
 
 #define gsSetImage(cmd, fmt, siz, width, i)                                                                \
     {                                                                                                      \
         {                                                                                                  \
             _SHIFTL(cmd, 24, 8) | _SHIFTL(fmt, 21, 3) | _SHIFTL(siz, 19, 2) | _SHIFTL((width) - 1, 0, 12), \
-                (uintptr_t) (i)                                                                            \
+                GBI_W1(i)                                                                            \
         }                                                                                                  \
     }
 
@@ -4149,14 +4161,14 @@ typedef union {
     }
 #endif
 
-#define gsDPWord(wordhi, wordlo) gsImmp1(G_RDPHALF_1, (uintptr_t) (wordhi)), gsImmp1(G_RDPHALF_2, (uintptr_t) (wordlo))
+#define gsDPWord(wordhi, wordlo) gsImmp1(G_RDPHALF_1, GBI_W1(wordhi)), gsImmp1(G_RDPHALF_2, GBI_W1(wordlo))
 
 #define gDPWord(pkt, wordhi, wordlo)                    \
     {                                                   \
         Gfx* _g = (Gfx*) (pkt);                         \
                                                         \
-        gImmp1(pkt, G_RDPHALF_1, (uintptr_t) (wordhi)); \
-        gImmp1(pkt, G_RDPHALF_2, (uintptr_t) (wordlo)); \
+        gImmp1(pkt, G_RDPHALF_1, GBI_W1(wordhi)); \
+        gImmp1(pkt, G_RDPHALF_2, GBI_W1(wordlo)); \
     }
 
 #define gDPFullSync(pkt) gDPNoParam(pkt, G_RDPFULLSYNC)

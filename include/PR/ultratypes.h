@@ -44,7 +44,23 @@ typedef s32 ptrdiff_t;
 #else
 #include <stddef.h>
 #include <stdint.h>
+#ifdef TARGET_PS3
+#include <sys/types.h> /* newlib defines ssize_t */
+#else
 typedef ptrdiff_t ssize_t;
+#endif
+#endif
+
+/*
+ * PS3: pointers are 64-bit, but everything the game can point at lives below
+ * 4 GB. A pointer declared with PTR32 is stored in 32 bits, so the structures
+ * that come straight from the ROM (display lists, texture tables, animations,
+ * audio banks) keep their N64 layout and are used without conversion.
+ */
+#ifdef TARGET_PS3
+#define PTR32 __attribute__((mode(SI)))
+#else
+#define PTR32
 #endif
 
 #endif

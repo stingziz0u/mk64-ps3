@@ -1,0 +1,30 @@
+// mk64-ps3 fragment program, layout A (the first one; kept as an R3 diagnostic mode):
+// colour and for alpha, plus fog.
+//
+// Each of A, B, C, D is "a constant or the texel". The constant part (prim,
+// env, shade, 0, 1...) is worked out on the CPU and arrives interpolated in
+// ca..cd. The texel part is switched on with weights that are 0 or 1:
+//   w0.xy  A += x * texel.rgb + y * texel.aaa      w0.zw  the same for B
+//   w1.xy  the same for C                          w1.zw  the same for D
+//   wa     alpha of A, B, C, D += texel.a
+// fog.rgb is the fog colour and fog.a how much of it (0 = none).
+float4 main(float4 fog : COLOR0,
+            float2 uv  : TEXCOORD0,
+            float4 ca  : TEXCOORD1,
+            float4 cb  : TEXCOORD2,
+            float4 cc  : TEXCOORD3,
+            float4 cd  : TEXCOORD4,
+            float4 w0  : TEXCOORD5,
+            float4 w1  : TEXCOORD6,
+            float4 wa  : TEXCOORD7,
+            uniform sampler2D tex : TEXUNIT0) : COLOR
+{
+    float4 t = tex2D(tex, uv);
+    float4 a = ca + float4(w0.x * t.rgb + w0.y * t.aaa, wa.x * t.a);
+    float4 b = cb + float4(w0.z * t.rgb + w0.w * t.aaa, wa.y * t.a);
+    float4 c = cc + float4(w1.x * t.rgb + w1.y * t.aaa, wa.z * t.a);
+    float4 d = cd + float4(w1.z * t.rgb + w1.w * t.aaa, wa.w * t.a);
+    float4 o = saturate((a - b) * c + d);
+    o.rgb = lerp(o.rgb, fog.rgb, fog.a);
+    return o;
+}

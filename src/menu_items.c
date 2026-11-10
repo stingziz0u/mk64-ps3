@@ -9,6 +9,9 @@
 
 #include "code_800029B0.h"
 #include "menu_items.h"
+#ifdef TARGET_PS3
+#include "ps3_game.h"
+#endif
 #include "cpu_vehicles_camera_path.h"
 #include "code_8006E9C0.h"
 #include "menus.h"
@@ -833,7 +836,15 @@ MkAnimation* D_800E7E34[] = {
     D_02001F44, D_02001F54, D_02001F64, D_02001F74, D_02001F84, D_02001F94,
 };
 
+#ifdef TARGET_PS3
+// The game indexes this table past its end (glyph indices go up to 0xEB):
+// on the N64 that reads on through the arrays laid out after it, the
+// Japanese glyphs. Here they are not one block in memory, and pointers are
+// 8 bytes, so the whole run is put together at start-up (see below).
+static MenuTexture* sGlyphTextureLUTFirst[] = {
+#else
 MenuTexture* gGlyphTextureLUT[] = {
+#endif
     seg2_textureFontLetterA,
     seg2_textureFontLetterB,
     seg2_textureFontLetterC,
@@ -996,6 +1007,31 @@ MenuTexture* D_800E828C[] = {
     D_020049E4,
     seg2_data_texture,
 };
+
+#ifdef TARGET_PS3
+// gGlyphTextureLUT as the N64 sees it: the arrays from 0x800E7E84 to
+// 0x800E8290, in address order (their names are their N64 addresses).
+#define GLYPH_RUN(a) { a, ARRAY_COUNT(a) }
+MenuTexture* gGlyphTextureLUT[(0x800E8290 - 0x800E7E84) / 4];
+static void __attribute__((constructor)) ps3_build_glyph_lut(void) {
+    static const struct {
+        MenuTexture** list;
+        s32 count;
+    } runs[] = {
+        GLYPH_RUN(sGlyphTextureLUTFirst), GLYPH_RUN(D_800E7FF0), GLYPH_RUN(D_800E80A0), GLYPH_RUN(D_800E8114),
+        GLYPH_RUN(D_800E8174),            GLYPH_RUN(D_800E817C), GLYPH_RUN(D_800E81E4), GLYPH_RUN(D_800E822C),
+        GLYPH_RUN(D_800E8234),            GLYPH_RUN(D_800E8254), GLYPH_RUN(D_800E8274), GLYPH_RUN(D_800E8284),
+    };
+    s32 n = 0, i, j;
+
+    for (i = 0; i < (s32) ARRAY_COUNT(runs); i++) {
+        for (j = 0; j < runs[i].count && n < (s32) ARRAY_COUNT(gGlyphTextureLUT); j++) {
+            gGlyphTextureLUT[n++] = runs[i].list[j];
+        }
+    }
+}
+#undef GLYPH_RUN
+#endif
 
 // Duplicates of the above 3 arrays
 // CC textures
@@ -3452,17 +3488,25 @@ void clear_menu_textures(void) {
  * @return void*
  */
 void* segmented_to_virtual_dupe(const void* addr) {
+#ifdef TARGET_PS3
+    return segmented_to_virtual(addr);
+#else
     size_t segment = (uintptr_t) addr >> 24;
     size_t offset = (uintptr_t) addr & 0x00FFFFFF;
 
     return (void*) ((gSegmentTable[segment] + offset) + 0x80000000);
+#endif
 }
 
 void* segmented_to_virtual_dupe_2(const void* addr) {
+#ifdef TARGET_PS3
+    return segmented_to_virtual(addr);
+#else
     size_t segment = (uintptr_t) addr >> 24;
     size_t offset = (uintptr_t) addr & 0x00FFFFFF;
 
     return (void*) ((gSegmentTable[segment] + offset) + 0x80000000);
+#endif
 }
 
 void load_menu_img(MenuTexture* addr) {
@@ -6869,6 +6913,35 @@ void func_800A1FB0(MenuItem* arg0) {
 
     gDisplayListHead = draw_box(gDisplayListHead, 0, 0, 0x00000140, 0x000000F0, 0, 0, 0, 0x00000064);
     switch (gSubMenuSelection) {
+#ifdef TARGET_PS3
+        case SUB_MENU_OPTION_RETURN_GAME_SELECT:
+        case SUB_MENU_OPTION_SOUND_MODE:
+        case SUB_MENU_OPTION_ASPECT_RATIO:
+        case SUB_MENU_OPTION_FRAME_RATE:
+        case SUB_MENU_OPTION_FPS_COUNTER:
+        case SUB_MENU_OPTION_SCREEN_FIT:
+        case SUB_MENU_OPTION_ERASE_ALL_DATA: {
+            // Seven lines instead of four, closer together.
+            static char* const sLines[] = { "RETURN TO GAME SELECT", "SOUND MODE", "ASPECT RATIO", "FRAME RATE",
+                                            "FPS COUNTER",           "SCREEN FIT", "ERASE ALL DATA" };
+
+            for (i = 0; i < ARRAY_COUNT(sLines); i++) {
+                set_text_color_rainbow_if_selected(gSubMenuSelection - SUB_MENU_OPTION_MIN, i, 3);
+                print_text_mode_1(0x00000032, 0x3E + (0x19 * i), sLines[i], 0, 0.9f, 0.95f);
+                if (i == (gSubMenuSelection - SUB_MENU_OPTION_MIN)) {
+                    spE0.column = 0x0032;
+                    spE0.row = 0x3E + (0x19 * i);
+                }
+            }
+            set_text_color(TEXT_GREEN);
+            print_text1_center_mode_1(0x000000E6, 0x3E + 0x19, gSoundModeNames[gSoundMode], 0, 1.0f, 0.95f);
+            for (i = 0; i < 4; i++) {
+                print_text1_center_mode_1(0x000000E6, 0x3E + 0x19 * (2 + i), (char*) ps3_option_text(i), 0, 1.0f,
+                                          0.95f);
+            }
+            break;
+        }
+#else
         case SUB_MENU_OPTION_RETURN_GAME_SELECT:
         case SUB_MENU_OPTION_SOUND_MODE:
         case SUB_MENU_OPTION_COPY_CONTROLLER_PAK:
@@ -6884,6 +6957,7 @@ void func_800A1FB0(MenuItem* arg0) {
             set_text_color(TEXT_GREEN);
             print_text1_center_mode_1(0x000000E6, 0x55 + 0x23, gSoundModeNames[gSoundMode], 0, 1.0f, 1.0f);
             break;
+#endif
         case SUB_MENU_ERASE_QUIT:
         case SUB_MENU_ERASE_ERASE:
             set_text_color(TEXT_YELLOW);

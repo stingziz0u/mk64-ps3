@@ -35,6 +35,11 @@
 #include "courses/all_course_data.h"
 #include <vehicles.h>
 #include "data/some_data.h"
+#ifdef TARGET_PS3
+#include "ps3_game.h"
+#else
+#define PS3_HUD_ANCHOR(a)
+#endif
 
 void func_800431B0(Vec3f pos, Vec3su orientation, f32 scale, Vtx* vtx) {
     rsp_set_matrix_transformation(pos, orientation, scale);
@@ -2388,6 +2393,7 @@ void func_8004EB38(s32 playerId) {
     hud_player* temp_s0;
 
     temp_s0 = &playerHUD[playerId];
+    PS3_HUD_ANCHOR(PS3_HUD_RIGHT);                     // the lap times, under TIME
     if ((u8) temp_s0->unk_7B != 0) {
         func_8004C9D8(temp_s0->lap1CompletionTimeX - 0x13, temp_s0->timerY + 8, 0x00000080,
                       (u8*) common_texture_hud_time, 0x00000020, 0x00000010, 0x00000020, 0x00000010);
@@ -2398,6 +2404,7 @@ void func_8004EB38(s32 playerId) {
                       (u8*) common_texture_hud_time, 0x00000020, 0x00000010, 0x00000020, 0x00000010);
         func_8004F950((s32) temp_s0->lap2CompletionTimeX, (s32) temp_s0->timerY, 0x00000050, (s32) temp_s0->someTimer);
     }
+    PS3_HUD_ANCHOR(PS3_HUD_LEFT);                      // the LAP after-images
     if ((u8) temp_s0->unk_7E != 0) {
         func_8004C9D8((s32) temp_s0->lapAfterImage1X, temp_s0->lapY + 3, 0x00000080, (u8*) common_texture_hud_lap,
                       0x00000020, 8, 0x00000020, 8);

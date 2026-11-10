@@ -754,7 +754,7 @@ void func_800BA8B0(s32 poolIdx, s32 id) {
                     }
                     break;
                 case 1: /* switch 1 */
-                    gCtlEntries[id].instruments = (struct Instrument**) (gUnkPool1.entries[temp_a2].ptr + 4);
+                    gCtlEntries[id].instruments = (struct Instrument* PTR32*) (gUnkPool1.entries[temp_a2].ptr + 4);
                     func_800BB584(id);
                     if (gBankLoadStatus[id] != 5) {
                         gBankLoadStatus[id] = 5;

@@ -4,7 +4,7 @@
 #include "abi.h"
 
 typedef struct {
-    u8* offset;
+    u8* PTR32 offset;
     s32 len;
 } ALSeqData;
 

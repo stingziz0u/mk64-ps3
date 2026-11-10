@@ -1,3 +1,6 @@
+#ifdef TARGET_PS3
+extern int gPs3Wide;
+#endif
 #include <ultra64.h>
 #include <macros.h>
 #include <common_structs.h>
@@ -1307,6 +1310,14 @@ bool is_object_visible_on_camera(s32 objectIndex, Camera* camera, u16 angle) {
     u16 temp_t2;
     s32 var_t0;
 
+#ifdef TARGET_PS3
+    /* The angle is the 4:3 view plus a little. 16:9 sees a third more to
+     * each side: objects at the sides (the Rainbow Road neon signs) popped in
+     * and out. */
+    if (gPs3Wide) {
+        angle = (u16) ((u32) angle * 4 / 3);
+    }
+#endif
     var_t0 = false;
     temp_t2 = (get_angle_between_xy(camera->pos[0], gObjectList[objectIndex].pos[0], camera->pos[2],
                                     gObjectList[objectIndex].pos[2]) +

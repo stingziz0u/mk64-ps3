@@ -6,6 +6,9 @@
 #include <course.h>
 
 #include "menus.h"
+#ifdef TARGET_PS3
+#include "ps3_game.h"
+#endif
 #include "main.h"
 #include "code_800029B0.h"
 #include "actors.h"
@@ -21,7 +24,12 @@
 #include "spawn_players.h"
 #include "seq_ids.h"
 
-#if ENABLE_DEBUG_MODE
+#ifdef TARGET_PS3
+// PS3: the debug menu of the title screen is a run-time switch (an empty
+// debugmenu.txt in USRDIR), off by default. See ps3_game.c.
+#define DEBUG_MODE_TOGGLE (gPs3DebugMenu != 0)
+#define DEBUG_MENU_SELECTION (gPs3DebugMenu ? DEBUG_MENU_DEBUG_MODE : DEBUG_MENU_DISABLED)
+#elif ENABLE_DEBUG_MODE
 #define DEBUG_MODE_TOGGLE true
 #define DEBUG_MENU_SELECTION DEBUG_MENU_DEBUG_MODE
 #else
@@ -261,6 +269,12 @@ void options_menu_act(struct Controller* controller, u16 controllerIdx) {
             case SUB_MENU_OPTION_RETURN_GAME_SELECT:
             case SUB_MENU_OPTION_SOUND_MODE:
             case SUB_MENU_OPTION_COPY_CONTROLLER_PAK:
+#ifdef TARGET_PS3
+            case SUB_MENU_OPTION_ASPECT_RATIO:
+            case SUB_MENU_OPTION_FRAME_RATE:
+            case SUB_MENU_OPTION_FPS_COUNTER:
+            case SUB_MENU_OPTION_SCREEN_FIT:
+#endif
             case SUB_MENU_OPTION_ERASE_ALL_DATA: {
                 tempVar = false;
                 if ((btnAndStick & D_JPAD) && (gSubMenuSelection < SUB_MENU_OPTION_MAX)) {
@@ -300,6 +314,15 @@ void options_menu_act(struct Controller* controller, u16 controllerIdx) {
                 }
                 if (btnAndStick & A_BUTTON) {
                     switch (gSubMenuSelection) {
+#ifdef TARGET_PS3
+                        case SUB_MENU_OPTION_ASPECT_RATIO:
+                        case SUB_MENU_OPTION_FRAME_RATE:
+                        case SUB_MENU_OPTION_FPS_COUNTER:
+                        case SUB_MENU_OPTION_SCREEN_FIT:
+                            ps3_option_toggle(gSubMenuSelection - SUB_MENU_OPTION_ASPECT_RATIO);
+                            play_sound2(SOUND_MENU_SELECT);
+                            return;
+#endif
                         case SUB_MENU_OPTION_SOUND_MODE:
                             if (gSoundMode < 3) {
                                 gSoundMode += 1;

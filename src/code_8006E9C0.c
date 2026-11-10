@@ -165,7 +165,17 @@ void func_8006EF60(void) {
     s16 huh;
     u8* wut;
 
+#ifdef TARGET_PS3
+    // 0x3FFFC000 u32s = 0xFFFF0000 bytes: with the N64's 32-bit addresses this
+    // is the 64 KB below gMenuCompressedBuffer, memory the menus do not use
+    // there. Here that is the game's own variables (and the index does not
+    // wrap with 64-bit pointers): the outlines get 64 KB of their own.
+    static u8 sOutlineBuffer[0x10000] __attribute__((aligned(16)));
+
+    wut = sOutlineBuffer;
+#else
     wut = (u8*) &gMenuCompressedBuffer[0x3FFFC000];
+#endif
     // clang-format off
     // God forgive me for my sins...
     huh = 0x14; if (0) {} for (i = 0; i < huh; i++) { D_8018D248[i] = dma_copy_base_misc_textures(gCourseOutlineTextures[i], wut, D_800E5520[i], D_800E5520[i]); wut += D_800E5520[i]; }

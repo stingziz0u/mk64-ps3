@@ -9,7 +9,7 @@
  */
 typedef struct {
     /* 0x00 */ s16 type;
-    /* 0x04 */ u64* textureData; // This should be interpreted as a segmented address
+    /* 0x04 */ u64* PTR32 textureData; // This should be interpreted as a segmented address
     /* 0x08 */ u16 width;
     /* 0x0A */ u16 height;
     /* 0x0C */ u16 dX;
@@ -23,7 +23,7 @@ typedef struct {
  *
  */
 typedef struct {
-    /* 0x00 */ MenuTexture* mk64Texture; // This should be interpreted as a segmented address
+    /* 0x00 */ MenuTexture* PTR32 mk64Texture; // This should be interpreted as a segmented address
     /* 0x04 */ s32 frame_length;
 } MkAnimation; // size = 0x8
 

@@ -4,7 +4,7 @@
 #include <PR/ultratypes.h>
 
 typedef struct {
-    u8* addr;      // segmented address texture file
+    u8* PTR32 addr; // segmented address texture file
     u32 file_size; // compressed file size
     u32 data_size; // uncompressed texture size
     u32 padding;   // always zero

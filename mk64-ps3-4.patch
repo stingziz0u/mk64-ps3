@@ -1,0 +1,434 @@
+diff --git a/.gitignore b/.gitignore
+index a37bbc4..276fc70 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -114,3 +114,5 @@ ps3/*.self
+ *.z64
+ *.v64
+ *.n64
++ps3/*.eep
++ps3/debugmenu.txt
+diff --git a/ps3/Makefile b/ps3/Makefile
+index 99f6e3d..87efa92 100644
+--- a/ps3/Makefile
++++ b/ps3/Makefile
+@@ -41,7 +41,7 @@ CC := ppu-gcc
+ LD := ppu-gcc
+ 
+ # Goes up by one with every patch; first line of the log and VERSION.TXT.
+-PATCHLEVEL := 3
++PATCHLEVEL := 4
+ VERSION    := stage1
+ OUT_PKG    := mk64-ps3-$(VERSION).pkg
+ 
+@@ -128,6 +128,9 @@ $(OBJ)/plat/%.o: source/%.c
+ 	@mkdir -p $(dir $@)
+ 	$(CC) $(PLAT_CFLAGS) -c $< -o $@
+ 
++# The patch level is printed by ps3_log.c: rebuild it when the Makefile changes.
++$(OBJ)/plat/ps3_log.o: Makefile
++
+ $(OBJ)/plat/ps3_video.o: source/ps3_video.c
+ 	@mkdir -p $(dir $@)
+ 	$(CC) $(PLAT_CFLAGS_VIDEO) -c $< -o $@
+diff --git a/ps3/hosttest/host_main.c b/ps3/hosttest/host_main.c
+new file mode 100644
+index 0000000..ebb178a
+--- /dev/null
++++ b/ps3/hosttest/host_main.c
+@@ -0,0 +1,193 @@
++/* host_main.c -- runs the game side of mk64-ps3 on big-endian PowerPC Linux
++ * (qemu-ppc64 user mode), with no console.
++ *
++ * The game objects are the very ones built for the PS3 (ppu-gcc, same ABI:
++ * 64-bit big-endian ELFv1); only the platform side (ps3_plat.h, ps3_log.h,
++ * ps3_rom.h) is replaced by this file. It catches logic, layout and 64-bit
++ * bugs before a round trip to the console. It says nothing about the RSX,
++ * real audio or PSL1GHT.
++ *
++ *   mk64host <rom.z64> <frames> [frame:buttons ...]
++ *
++ * "frame:buttons" presses the given PS3PAD_* bits (hex) from that frame on,
++ * e.g. 300:0800 304:0000 presses START for four frames.
++ */
++
++#define _GNU_SOURCE
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdarg.h>
++#include <string.h>
++#include <stdint.h>
++#include <signal.h>
++#include <pthread.h>
++#include <ucontext.h>
++
++#include "ps3_plat.h"
++#include "ps3_log.h"
++#include "ps3_rom.h"
++
++#define ROM_SIZE 0xC00000u
++
++static uint8_t *s_rom;
++static unsigned s_frame, s_max_frames;
++static uint64_t s_time_us = 1000000;
++static struct { unsigned frame, buttons; } s_script[256];
++static int s_nscript;
++
++/* ---- ps3_log.h ---- */
++void ps3_log_init(void) {}
++void ps3_log_shutdown(void) {}
++void ps3_log(const char *msg) { puts(msg); fflush(stdout); }
++void ps3_logf(const char *fmt, ...)
++{
++    va_list ap;
++    va_start(ap, fmt);
++    vprintf(fmt, ap);
++    va_end(ap);
++    putchar('\n');
++    fflush(stdout);
++}
++
++/* ---- ps3_rom.h ---- */
++int PS3_Rom_Read(void *dst, uint32_t off, uint32_t size)
++{
++    if (off > ROM_SIZE || size > ROM_SIZE - off) {
++        ps3_logf("[rom] read outside the ROM: off 0x%X size 0x%X", off, size);
++        return -1;
++    }
++    memcpy(dst, s_rom + off, size);
++    return 0;
++}
++
++/* ---- ps3_plat.h ---- */
++uint64_t PS3_Plat_TimeUs(void) { return s_time_us; }
++void PS3_Plat_SleepUs(uint64_t us) { s_time_us += us; }
++int  PS3_Plat_ExitRequested(void) { return 0; }
++void PS3_Plat_Exit(void) { ps3_log("[host] exit"); exit(0); }
++void PS3_Plat_TextScreen(const char *title, const char *const *lines, int nlines)
++{
++    (void)title; (void)lines; (void)nlines;
++}
++
++void PS3_Plat_Pump(void)
++{
++    s_frame++;
++    s_time_us += 1000;                 /* the frame took 1 ms; the rest is "slept" */
++    if (s_frame >= s_max_frames) {
++        ps3_logf("[host] %u frames done", s_frame);
++        exit(0);
++    }
++}
++
++void PS3_Plat_Pad(int port, ps3_padstate_t *out)
++{
++    int i;
++
++    memset(out, 0, sizeof(*out));
++    if (port != 0) return;
++    out->connected = 1;
++    for (i = 0; i < s_nscript; i++)
++        if (s_frame >= s_script[i].frame) out->buttons = s_script[i].buttons;
++}
++
++int PS3_Plat_LoadFile(const char *name, void *buf, int size)
++{
++    FILE *f = fopen(name, "rb");
++    int n;
++    if (!f) return -1;
++    n = (int)fread(buf, 1, (size_t)size, f);
++    fclose(f);
++    return n;
++}
++
++int PS3_Plat_SaveFile(const char *name, const void *buf, int size)
++{
++    FILE *f = fopen(name, "wb");
++    int n;
++    if (!f) return -1;
++    n = (int)fwrite(buf, 1, (size_t)size, f);
++    fclose(f);
++    return n;
++}
++
++/* ---- crash report: fault address, pc and the chain of return addresses ---- */
++static void on_crash(int sig, siginfo_t *si, void *ctx)
++{
++    ucontext_t *uc = (ucontext_t *)ctx;
++    unsigned long *r = (unsigned long *)uc->uc_mcontext.gp_regs;
++    unsigned long sp = r[1];
++    int i;
++
++    printf("[host] CRASH signal %d at frame %u: fault addr %p, pc 0x%lx, lr 0x%lx\n",
++           sig, s_frame, si->si_addr, r[32], r[36]);
++    for (i = 0; i < 31; i += 4)
++        printf("[host]   r%-2d %016lx  r%-2d %016lx  r%-2d %016lx  r%-2d %016lx\n",
++               i, r[i], i + 1, r[i + 1], i + 2, r[i + 2], i + 3, r[i + 3]);
++    for (i = 0; i < 24 && sp >= 0x10000000UL && sp < 0x100000000UL; i++) {
++        unsigned long next = *(unsigned long *)sp;
++        if (next <= sp || next >= 0x100000000UL) break;
++        printf("[host]   return address 0x%lx\n", *(unsigned long *)(next + 16));
++        sp = next;
++    }
++    fflush(stdout);
++    _exit(3);
++}
++
++/* The game needs every address it can point at below 4 GB, the stack
++ * included (on the PS3 it is at 0xD0000000): run it on a stack in .bss. */
++static char s_stack[8 * 1024 * 1024] __attribute__((aligned(16)));
++static char s_sigstack[256 * 1024];
++
++static void *game_thread(void *arg)
++{
++    stack_t ss;
++
++    (void)arg;
++    ss.ss_sp = s_sigstack;
++    ss.ss_size = sizeof(s_sigstack);
++    ss.ss_flags = 0;
++    sigaltstack(&ss, NULL);
++    PS3_Game_Run();
++    return NULL;
++}
++
++int main(int argc, char **argv)
++{
++    struct sigaction sa;
++    pthread_attr_t attr;
++    pthread_t th;
++    FILE *f;
++    int i;
++
++    if (argc < 3) {
++        fprintf(stderr, "usage: %s rom.z64 frames [frame:buttons ...]\n", argv[0]);
++        return 2;
++    }
++    s_max_frames = (unsigned)strtoul(argv[2], NULL, 0);
++    for (i = 3; i < argc && s_nscript < 256; i++, s_nscript++)
++        sscanf(argv[i], "%u:%x", &s_script[s_nscript].frame, &s_script[s_nscript].buttons);
++
++    s_rom = malloc(ROM_SIZE);
++    f = fopen(argv[1], "rb");
++    if (!f || fread(s_rom, 1, ROM_SIZE, f) != ROM_SIZE) {
++        fprintf(stderr, "cannot read the ROM %s\n", argv[1]);
++        return 2;
++    }
++    fclose(f);
++
++    memset(&sa, 0, sizeof(sa));
++    sa.sa_sigaction = on_crash;
++    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
++    sigaction(SIGSEGV, &sa, NULL);
++    sigaction(SIGBUS, &sa, NULL);
++    sigaction(SIGILL, &sa, NULL);
++    sigaction(SIGFPE, &sa, NULL);
++
++    printf("[host] stack %p .. %p\n", (void *)s_stack, (void *)(s_stack + sizeof(s_stack)));
++    pthread_attr_init(&attr);
++    pthread_attr_setstack(&attr, s_stack, sizeof(s_stack));
++    pthread_create(&th, &attr, game_thread, NULL);
++    pthread_join(th, NULL);
++    return 0;
++}
+diff --git a/ps3/hosttest/run.sh b/ps3/hosttest/run.sh
+new file mode 100755
+index 0000000..b7c5e7c
+--- /dev/null
++++ b/ps3/hosttest/run.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++# Builds and runs the host test. Run `make` in ps3/ first (the game objects
++# are the PS3 ones). Usage: hosttest/run.sh <rom.z64> <frames> [frame:buttons ...]
++set -e
++cd "$(dirname "$0")/.."
++OBJS=$(find build/obj/game build/obj/jp build/obj/sup build/obj/gen -name '*.o')
++powerpc64-linux-gnu-gcc -O1 -g -Wall -Isource -c hosttest/host_main.c -o build/host_main.o
++powerpc64-linux-gnu-gcc -static -o build/mk64host build/host_main.o $OBJS -lm -lpthread
++exec qemu-ppc64 -cpu power9 build/mk64host "$@"
+diff --git a/ps3/source/game/ps3_game.c b/ps3/source/game/ps3_game.c
+index 352df72..2ec0da2 100644
+--- a/ps3/source/game/ps3_game.c
++++ b/ps3/source/game/ps3_game.c
+@@ -11,6 +11,8 @@
+ 
+ #include "main.h"
+ #include "code_800029B0.h"
++#include "menus.h"
++#include "course.h"
+ #include "ps3_game.h"
+ #include "ps3_gfx_walk.h"
+ #include "ps3_plat.h"
+@@ -21,6 +23,8 @@
+ extern u8 _memoryPoolSegmentNoloadStart[];
+ extern u8 _racingSegmentStart[];
+ 
++int gPs3DebugMenu;
++
+ void ps3_stage(const char* what) {
+     ps3_logf("[game] %s", what);
+ }
+@@ -28,9 +32,9 @@ void ps3_stage(const char* what) {
+ static void log_frame(const char* why) {
+     const ps3_gfx_stats_t* s = &gPs3GfxStats;
+ 
+-    ps3_logf("[frame %u] %s: state %d, timer %d | cmds %u, dl %u (depth %u), vtx %u in %u loads, tris %u, "
++    ps3_logf("[frame %u] %s: state %d, menu %d, course %d, timer %d | cmds %u, dl %u (depth %u), vtx %u in %u loads, tris %u, "
+              "mtx %u, tex %u, texrect %u, fill %u, errors %u | heap %lu KB used, %lu KB free",
+-             s->frame, why, (int) gGamestate, (int) gGlobalTimer, s->commands, s->dlCalls, s->maxDepth,
++             s->frame, why, (int) gGamestate, (int) gMenuSelection, (int) gCurrentCourseId, (int) gGlobalTimer, s->commands, s->dlCalls, s->maxDepth,
+              s->vertices, s->vtxLoads, s->triangles, s->matrices, s->textures, s->texRects, s->fillRects,
+              s->errors, (unsigned long) ((gNextFreeMemoryAddress - (uintptr_t) _memoryPoolSegmentNoloadStart) / 1024),
+              (unsigned long) ((gHeapEndPtr - gNextFreeMemoryAddress) / 1024));
+@@ -62,6 +66,7 @@ static void status_screen(void) {
+ void ps3_frame_end(void) {
+     static uint64_t frameStart;
+     static s32 lastState = -1000;
++    static s32 lastMenu = -1000;
+     static uint64_t lastLog;
+     uint64_t now, due;
+     ps3_padstate_t pad;
+@@ -69,13 +74,14 @@ void ps3_frame_end(void) {
+ 
+     if (gPs3GfxStats.frame <= 5) {
+         log_frame("first frames");
+-    } else if (gGamestate != lastState) {
++    } else if (gGamestate != lastState || gMenuSelection != lastMenu) {
+         log_frame("game state changed");
+     } else if (PS3_Plat_TimeUs() - lastLog > 10000000ULL) {
+         log_frame("every 10 s");
+         lastLog = PS3_Plat_TimeUs();
+     }
+     lastState = gGamestate;
++    lastMenu = gMenuSelection;
+ 
+     status_screen();
+ 
+@@ -112,6 +118,11 @@ void PS3_Game_Run(void) {
+              (unsigned) sizeof(Mtx), (unsigned) sizeof(void*));
+     ps3_logf("[game] heap %p .. %p (%lu KB)", (void*) _memoryPoolSegmentNoloadStart, (void*) _racingSegmentStart,
+              (unsigned long) ((_racingSegmentStart - _memoryPoolSegmentNoloadStart) / 1024));
++    {
++        char c;
++        gPs3DebugMenu = PS3_Plat_LoadFile("debugmenu.txt", &c, 1) >= 0;
++        ps3_logf("[game] debug menu (debugmenu.txt): %s", gPs3DebugMenu ? "ON" : "off");
++    }
+     ps3_romdata_load();
+     ps3_game_main();
+ }
+diff --git a/ps3/source/game/ps3_game.h b/ps3/source/game/ps3_game.h
+index 8775f66..c737f3b 100644
+--- a/ps3/source/game/ps3_game.h
++++ b/ps3/source/game/ps3_game.h
+@@ -17,6 +17,7 @@ void ps3_init_segment_table(void);
+ void audio_init(void);
+ 
+ /* source/game/ps3_game.c */
++extern int gPs3DebugMenu;                 /* debugmenu.txt present: see src/menus.c */
+ void ps3_stage(const char* what);         /* "[game] what" in the log */
+ void ps3_frame_end(void);                 /* called from osViSwapBuffer */
+ 
+@@ -25,5 +26,6 @@ void ps3_gfx_run_task(void* task);
+ 
+ /* source/game/ps3_romdata.c: main-segment data that is not in the source. */
+ void ps3_romdata_load(void);
++extern unsigned char gPs3LowRam[0x10000];
+ 
+ #endif /* PS3_GAME_H */
+diff --git a/ps3/source/game/ps3_gfx_walk.c b/ps3/source/game/ps3_gfx_walk.c
+index 4878846..7f30e11 100644
+--- a/ps3/source/game/ps3_gfx_walk.c
++++ b/ps3/source/game/ps3_gfx_walk.c
+@@ -97,8 +97,9 @@ static void walk(const Gfx* dl) {
+             }
+ 
+             case (u8) G_MOVEWORD:
+-                if (((w0 >> 16) & 0xFF) == G_MW_SEGMENT) {
+-                    u32 seg = (w0 & 0xFFFF) / 4;
++                /* F3DEX: w0 = cmd << 24 | offset << 8 | index */
++                if ((w0 & 0xFF) == G_MW_SEGMENT) {
++                    u32 seg = ((w0 >> 8) & 0xFFFF) / 4;
+ 
+                     if (seg < 16) {
+                         sSegment[seg] = (uintptr_t) w1;
+diff --git a/ps3/source/game/ps3_romdata.c b/ps3/source/game/ps3_romdata.c
+index 11c718f..b82d9b9 100644
+--- a/ps3/source/game/ps3_romdata.c
++++ b/ps3/source/game/ps3_romdata.c
+@@ -24,6 +24,14 @@ static const struct {
+     { "gTLUTOnomatopoeia", D_800E52D0, 0x800E52D0, 0x200 },
+ };
+ 
++/* What a segmented address resolves to while its segment has no base yet: on
++ * the N64 the base is 0, so the address lands in the first 64 KB of RAM,
++ * 0x400 bytes of system area and then the start of the game code. The game
++ * relies on it: the static over the course pictures of the cup selection
++ * screen is drawn from 0x0B002A00 with segment 0x0B unset, i.e. from its own
++ * code used as a texture. Same bytes here, from the ROM. */
++u8 gPs3LowRam[0x10000];
++
+ void ps3_romdata_load(void) {
+     u32 i;
+ 
+@@ -32,5 +40,6 @@ void ps3_romdata_load(void) {
+             ps3_logf("[romdata] could not read %s", sRomData[i].name);
+         }
+     }
++    PS3_Rom_Read(gPs3LowRam + 0x400, 0x1000, sizeof(gPs3LowRam) - 0x400);
+     ps3_logf("[romdata] %u block(s) read from the ROM", (unsigned) i);
+ }
+diff --git a/src/menus.c b/src/menus.c
+index d477aef..c297ba6 100644
+--- a/src/menus.c
++++ b/src/menus.c
+@@ -21,7 +21,12 @@
+ #include "spawn_players.h"
+ #include "seq_ids.h"
+ 
+-#if ENABLE_DEBUG_MODE
++#ifdef TARGET_PS3
++// PS3: the debug menu of the title screen is a run-time switch (an empty
++// debugmenu.txt in USRDIR), off by default. See ps3_game.c.
++#define DEBUG_MODE_TOGGLE (gPs3DebugMenu != 0)
++#define DEBUG_MENU_SELECTION (gPs3DebugMenu ? DEBUG_MENU_DEBUG_MODE : DEBUG_MENU_DISABLED)
++#elif ENABLE_DEBUG_MODE
+ #define DEBUG_MODE_TOGGLE true
+ #define DEBUG_MENU_SELECTION DEBUG_MENU_DEBUG_MODE
+ #else
+diff --git a/src/racing/memory.c b/src/racing/memory.c
+index 40a78d2..953e4e9 100644
+--- a/src/racing/memory.c
++++ b/src/racing/memory.c
+@@ -96,12 +96,13 @@ void* get_next_available_memory_addr(uintptr_t size) {
+  * `index << 24`, so `gSegmentTable[addr >> 24] + (addr & 0xFFFFFF)` gives back
+  * a real pointer unchanged. No PS3 memory lives in 0x01000000..0x0FFFFFFF
+  * (code is below 16 MB, data at 0x10000000, heap at 0x50000000 and up).
++ * A game segment with no base yet points at gPs3LowRam (ps3_romdata.c).
+  */
+ void ps3_init_segment_table(void) {
+     s32 i;
+ 
+     for (i = 0; i < 256; i++) {
+-        gSegmentTable[i] = (i >= 1 && i <= 15) ? 0 : ((uintptr_t) i << 24);
++        gSegmentTable[i] = (i >= 1 && i <= 15) ? (uintptr_t) gPs3LowRam : ((uintptr_t) i << 24);
+     }
+ }
+ 
+@@ -1333,10 +1334,18 @@ void displaylist_unpack(uintptr_t* data, uintptr_t finalDisplaylistOffset, u32 a
+ }
+ 
+ struct UnkStr_802AA7C8 {
++#ifdef TARGET_PS3
++    // Same as course_texture (include/course_offsets.h): a table in the ROM.
++    u8* PTR32 unk0;
++    u32 unk4;
++    u32 unk8;
++    u32 unkC;
++#else
+     u8* unk0;
+     uintptr_t unk4;
+     uintptr_t unk8;
+     uintptr_t unkC;
++#endif
+ };
+ 
+ void decompress_textures(u32* arg0) {

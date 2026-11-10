@@ -182,7 +182,12 @@ Vtx gBalloonVertexPlane2[] = {
 };
 
 u8 D_800E52D0[] = {
+#ifdef TARGET_PS3
+    /* 0x200 bytes, read from the ROM at boot (ps3/source/game/ps3_romdata.c) */
+    [0x1FF] = 0
+#else
 #include "assets/onomatopoeia/gTLUTOnomatopoeia.inc.c"
+#endif
 };
 
 u8* gCourseOutlineTextures[] = {

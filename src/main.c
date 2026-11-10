@@ -125,7 +125,11 @@ f32 gCourseNearPersp;
 UNUSED f32 D_80150154;
 
 struct D_80150158 gD_80150158[16];
+#ifdef TARGET_PS3
+uintptr_t gSegmentTable[256];
+#else
 uintptr_t gSegmentTable[16];
+#endif
 Gfx* gDisplayListHead;
 
 struct SPTask* gGfxSPTask;
@@ -379,11 +383,21 @@ void func_80000BEC(void) {
 }
 
 void dispatch_audio_sptask(struct SPTask* spTask) {
+#ifdef TARGET_PS3
+    // No RSP: ps3_audio_tick() runs the audio task itself.
+    return;
+#endif
     osWritebackDCacheAll();
     osSendMesg(&gSPTaskMesgQueue, spTask, OS_MESG_NOBLOCK);
 }
 
 void exec_display_list(struct SPTask* spTask) {
+#ifdef TARGET_PS3
+    // No RSP: the display list is drawn right here, in the game thread.
+    spTask->state = SPTASK_STATE_FINISHED_DP;
+    ps3_gfx_run_task(&spTask->task);
+    return;
+#endif
     osWritebackDCacheAll();
     spTask->state = SPTASK_STATE_NOT_STARTED;
     if (sCurrentDisplaySPTask == NULL) {
@@ -478,6 +492,10 @@ void display_and_vsync(void) {
 }
 
 void init_segment_ending_sequences(void) {
+#ifdef TARGET_PS3
+    // The "ending" and "racing" code segments are part of the executable.
+    return;
+#endif
     bzero((void*) SEG_ENDING, SEG_ENDING_SIZE);
     osWritebackDCacheAll();
     dma_copy((u8*) SEG_ENDING, (u8*) SEG_ENDING_ROM_START, SEG_ENDING_ROM_SIZE);
@@ -486,6 +504,9 @@ void init_segment_ending_sequences(void) {
 }
 
 void init_segment_racing(void) {
+#ifdef TARGET_PS3
+    return;
+#endif
     bzero((void*) SEG_RACING, SEG_RACING_SIZE);
     osWritebackDCacheAll();
     dma_copy((u8*) SEG_RACING, (u8*) SEG_RACING_ROM_START, SEG_RACING_ROM_SIZE);
@@ -548,7 +569,12 @@ void setup_game_memory(void) {
                  &gDmaMesgQueue);
     osRecvMesg(&gDmaMesgQueue, &gMainReceivedMesg, OS_MESG_BLOCK);
 
+#ifdef TARGET_PS3
+    // The size in the MIO0 header is a 32-bit field.
+    textureSegSize = *(u32*) (textureSegStart + 4);
+#else
     textureSegSize = *(uintptr_t*) (textureSegStart + 4);
+#endif
     textureSegSize = ALIGN16(textureSegSize);
     allocatedMemory = gNextFreeMemoryAddress;
     mio0decode((u8*) textureSegStart, (u8*) allocatedMemory);
@@ -1232,3 +1258,46 @@ void thread4_audio(UNUSED void* arg) {
         profiler_log_thread4_time();
     }
 }
+
+#ifdef TARGET_PS3
+/**
+ * One 60 Hz tick. The N64 counts them in the VI interrupt (handle_vblank);
+ * the game derives its tick speed from how many went by since the last frame.
+ */
+void ps3_vblank(void) {
+    gVBlankTimer += V_BlANK_TIMER_ITER;
+    sNumVBlanks++;
+    ps3_audio_tick();                       // what thread4_audio did on every vblank
+}
+
+/**
+ * PS3 entry point. Does what main_func, thread1_idle and thread3_video set up
+ * on the N64 and then runs the game loop in this same thread: there is no
+ * scheduler, the display list is drawn in exec_display_list() and the frame
+ * ends in osViSwapBuffer(). Does not return.
+ */
+void ps3_game_main(void) {
+    s32 i;
+    u64* framebuffer1;
+
+    osInitialize();
+    ps3_init_segment_table();
+
+    gPhysicalFramebuffers[0] = (u16*) &gFramebuffer0;
+    gPhysicalFramebuffers[1] = (u16*) &gFramebuffer1;
+    gPhysicalFramebuffers[2] = (u16*) &gFramebuffer2;
+    framebuffer1 = (u64*) &gFramebuffer1;
+    for (i = 0; i < 19200; i++) {
+        framebuffer1[i] = 0;
+    }
+
+    ps3_stage("setup_mesg_queues");
+    setup_mesg_queues();
+    ps3_stage("setup_game_memory");
+    setup_game_memory();
+    ps3_stage("audio_init");
+    audio_init();
+    ps3_stage("thread5_game_loop");
+    thread5_game_loop(NULL);
+}
+#endif

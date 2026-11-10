@@ -184,7 +184,7 @@ typedef struct {
     /* 0x00 */ s32 type;
     /* 0x04 */ s32 size;
     /* 0x08 */ s32 always_zero_never_used;
-    /* 0x0C */ Gfx* model;
+    /* 0x0C */ Gfx* PTR32 model;
     /* 0x10 */ s32 pos[3];
 } Armature;
 
@@ -202,17 +202,17 @@ typedef struct {
     /* 0x04 */ s32 always_zero_never_used;
     /* 0x08 */ s16 animation_length;
     /* 0x0A */ u16 has_value_but_never_used;
-    /* 0x0C */ s16* angle_array;
-    /* 0x10 */ AnimationLimbVector* animation_cycle_spec_vector;
+    /* 0x0C */ s16* PTR32 angle_array;
+    /* 0x10 */ AnimationLimbVector* PTR32 animation_cycle_spec_vector;
 } Animation;
 
 /* Function Prototypes */
 
 void convert_to_fixed_point_matrix_animation(Mtx* dest, Mat4 src);
 void mtxf_translate_rotate2(Mat4 dest, Vec3f pos, Vec3s angle);
-s16 get_animation_length(Animation**, s16);
+s16 get_animation_length(Animation* PTR32*, s16);
 void render_limb_or_add_mtx(Armature*, s16*, AnimationLimbVector, s32);
 void render_armature(Armature*, Animation*, s16);
-s16 render_animated_model(Armature*, Animation**, s16, s16);
+s16 render_animated_model(Armature*, Animation* PTR32*, s16, s16);
 
 #endif

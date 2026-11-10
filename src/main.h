@@ -170,6 +170,9 @@ extern f32 gScreenAspect;
 
 extern struct D_80150158 gD_80150158[];
 extern uintptr_t gSegmentTable[];
+#ifdef TARGET_PS3
+#include "ps3_game.h"
+#endif
 extern Gfx* gDisplayListHead;
 extern struct SPTask* gGfxSPTask;
 extern s32 D_801502A0;

@@ -83,6 +83,15 @@
         }                                                                                                            \
     }
 
+#ifdef TARGET_PS3
+// PS3: there is no KSEG0. A "physical" address is the address itself, and
+// gSegmentTable has 256 entries so that a real pointer (top byte 0x00 or
+// >= 0x10) goes through the segment arithmetic unchanged. See
+// ps3_init_segment_table() in src/racing/memory.c.
+#define VIRTUAL_TO_PHYSICAL(addr) ((uintptr_t) (addr))
+#define PHYSICAL_TO_VIRTUAL(addr) ((uintptr_t) (addr))
+#define VIRTUAL_TO_PHYSICAL2(addr) ((u8*) (uintptr_t) (addr))
+#else
 // convert a virtual address to physical.
 #define VIRTUAL_TO_PHYSICAL(addr) ((uintptr_t) (addr) & 0x1FFFFFFF)
 
@@ -91,6 +100,7 @@
 
 // another way of converting virtual to physical
 #define VIRTUAL_TO_PHYSICAL2(addr) ((u8*) (addr) - 0x80000000U)
+#endif
 
 // aligns an address to the next 16 bytes
 #define ALIGN16(val) (((val) + 0xF) & ~0xF)

@@ -3,7 +3,7 @@
 
 #include "audio/internal.h"
 
-#ifdef TARGET_N64
+#if defined(TARGET_N64) && !defined(IS_BIG_ENDIAN)
 #define IS_BIG_ENDIAN 1
 #endif
 

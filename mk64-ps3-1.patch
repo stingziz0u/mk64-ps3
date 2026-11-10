@@ -1,0 +1,1590 @@
+diff --git a/.gitignore b/.gitignore
+index 0057cda..a37bbc4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -105,3 +105,12 @@ mingw64/
+ 
+ # torch
+ torch.hash.yml
++
++# PS3 port build output
++ps3/build/
++ps3/pkgfiles/
++ps3/*.pkg
++ps3/*.self
++*.z64
++*.v64
++*.n64
+diff --git a/ps3/Makefile b/ps3/Makefile
+new file mode 100644
+index 0000000..aa83329
+--- /dev/null
++++ b/ps3/Makefile
+@@ -0,0 +1,138 @@
++#----------------------------------------------------------------------------
++# mk64-ps3 -- Mario Kart 64 (n64decomp/mk64) for PS3 homebrew (PSL1GHT)
++#
++# Stage 0: platform skeleton (log, pad, RSX text screen) + the ROM loader.
++# No game code yet.
++#
++#   make                  -> .pkg
++#   make clean
++#   make check-toolchain
++#
++# The packaging (.elf -> .self -> .pkg) is done entirely by ppu_rules with its
++# own pattern rules. Do NOT do it by hand: that skips the strip + sprxlinker
++# before signing and package_finalize after pkg.py, and the result installs
++# but does not run.
++#----------------------------------------------------------------------------
++
++ifeq ($(strip $(PS3DEV)),)
++$(error PS3DEV is not set. Run: export PS3DEV=/usr/local/ps3dev)
++endif
++
++include $(PS3DEV)/ppu_rules
++
++#----------------------------------------------------------------------------
++# Package identity
++#
++# APPID: EXACTLY 9 characters. With 8 the PS3 pads it to 9 with "_" and every
++# path built from it stops matching.
++#
++# ':=' and not '?=': ppu_rules defines TITLE and APPID with '?=' BEFORE these
++# lines, so with '?=' its defaults would win.
++#----------------------------------------------------------------------------
++TARGET    := mk64ps3
++TITLE     := mk64-ps3
++APPID     := MK64PS300
++CONTENTID := UP0001-$(APPID)_00-0000000000000000
++
++PKGFILES  := $(CURDIR)/pkgfiles
++ICON0     := $(CURDIR)/ICON0.PNG
++
++CC := ppu-gcc
++LD := ppu-gcc
++
++CFLAGS += -O2 -Wall -std=gnu11
++# Goes up by one with every patch; first line of the log and VERSION.TXT.
++PATCHLEVEL := 1
++
++CFLAGS += -D__PS3__ -DPS3_APPID=\"$(APPID)\" -DPS3_PATCHLEVEL=$(PATCHLEVEL)
++# -MMD -MP: changing a header rebuilds what includes it.
++CFLAGS += -MMD -MP
++CFLAGS += -Isource
++CFLAGS += $(LIBPSL1GHT_INC)
++
++# ps3_video.c goes at -O1 -fno-inline on purpose: PSL1GHT's syscall stubs are
++# data indirection symbols, not normal functions, and aggressive inlining
++# breaks their resolution at link time.
++CFLAGS_VIDEO := $(filter-out -O2,$(CFLAGS)) -O1 -fno-inline
++
++# -lrt and -llv2 are MANDATORY: without them the binary links with no errors,
++# the PKG installs, and opening it gives a black screen and back to the XMB
++# without ever reaching main().
++LIBS := gcm_sys rsx sysutil io audio rt lv2 m
++
++vpath %.c source
++
++SRCS := main.c ps3_log.c ps3_pad.c ps3_video.c ps3_rom.c
++OBJS := $(SRCS:.c=.o)
++
++.PHONY: all clean check-toolchain getlog
++
++VERSION := stage0
++OUT_PKG := mk64-ps3-$(VERSION).pkg
++
++# The PKG to install is the .gnpdrm.pkg (the one that went through
++# package_finalize), not the bare .pkg.
++all: $(TARGET).pkg
++	@cp $(TARGET).gnpdrm.pkg $(OUT_PKG)
++	@echo ""
++	@echo "PKG to install: $(CURDIR)/$(OUT_PKG)"
++	@ls -la $(OUT_PKG)
++
++%.o: %.c
++	$(CC) $(CFLAGS) -c $< -o $@
++
++ps3_video.o: source/ps3_video.c
++	$(CC) $(CFLAGS_VIDEO) -c $< -o $@
++
++$(TARGET).elf: $(OBJS)
++	$(LD) $(OBJS) $(LIBPSL1GHT_LIB) -o $(TARGET).elf $(foreach lib,$(LIBS),-l$(lib))
++
++#----------------------------------------------------------------------------
++# PKG content and icon
++#
++# pkgfiles/ mirrors the PKG, NOT its USRDIR: what must end up in USRDIR goes
++# in pkgfiles/USRDIR/. The game data does NOT go here: the user copies their
++# own ROM to USRDIR by FTP.
++#
++# The directory cannot be EMPTY ('cp -rf $(PKGFILES)/*' fails), so VERSION.TXT
++# is always written; it also tells which build is installed on the console.
++#----------------------------------------------------------------------------
++$(PKGFILES)/USRDIR/VERSION.TXT: $(OBJS)
++	@mkdir -p $(PKGFILES)/USRDIR
++	@echo "$(TITLE) -- $(VERSION) -- patch $(PATCHLEVEL) -- `date +%Y-%m-%d\ %H:%M`" > $@
++
++# XMB icon (320x176 PNG). If it is missing, a plain one is generated so the
++# build does not stop.
++$(ICON0):
++	@echo "No ICON0.PNG, generating a 320x176 placeholder..."
++	@python3 -c "import zlib,struct;w,h=320,176;\
++rows=b''.join(b'\x00'+bytes([200,30,30,255])*w for _ in range(h));\
++png=lambda t,d:struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d));\
++open('$(ICON0)','wb').write(b'\x89PNG\r\n\x1a\n'+png(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+png(b'IDAT',zlib.compress(rows))+png(b'IEND',b''))"
++
++$(TARGET).pkg: $(PKGFILES)/USRDIR/VERSION.TXT $(ICON0)
++
++-include $(OBJS:.o=.d)
++
++check-toolchain:
++	@echo "PS3DEV   = $(PS3DEV)"
++	@echo "ppu_rules: `test -f $(PS3DEV)/ppu_rules && echo OK || echo MISSING`"
++	@$(CC) --version | head -1
++	@echo "APPID    = $(APPID)  (length: `printf '%s' '$(APPID)' | wc -c`, MUST be 9)"
++	@for l in $(LIBS); do \
++	   if [ -f "$(PS3DEV)/ppu/lib/lib$$l.a" ]; then printf "  OK      lib%s.a\n" "$$l"; \
++	   elif $(CC) -print-file-name=lib$$l.a | grep -q /; then printf "  OK      lib%s.a (gcc sysroot)\n" "$$l"; \
++	   else printf "  MISSING lib%s.a\n" "$$l"; fi; \
++	 done
++
++# Optional: fetch the log without leaving the terminal.
++#   make getlog PS3IP=192.168.1.50
++PS3USER ?= anonymous:anonymous
++getlog:
++	@test -n "$(PS3IP)" || (echo "Usage: make getlog PS3IP=<ip>"; exit 1)
++	curl -s -u $(PS3USER) ftp://$(PS3IP)/dev_hdd0/game/$(APPID)/USRDIR/mk64_log.txt -o mk64_log.txt
++	@cat mk64_log.txt
++
++clean:
++	rm -f *.o *.d $(TARGET).elf $(TARGET).self $(TARGET).fake.self $(TARGET).pkg $(TARGET).gnpdrm.pkg
++	rm -rf build $(PKGFILES)
+diff --git a/ps3/source/main.c b/ps3/source/main.c
+new file mode 100644
+index 0000000..46adce9
+--- /dev/null
++++ b/ps3/source/main.c
+@@ -0,0 +1,247 @@
++/* main.c -- mk64-ps3, stage 0.
++ *
++ * This binary is not Mario Kart 64 yet. It is the skeleton that checks, in
++ * order and leaving a trace in the log, every link that has broken before
++ * without giving any error:
++ *
++ *   [0] the binary reaches main()        -> if not, -lrt -llv2 are missing
++ *   [1] worker thread
++ *   [2] sysutil callback registered      -> without it, quitting from the PS
++ *                                           button restarts the console
++ *   [3] USRDIR is writable (the log lives there)
++ *   [4] pad
++ *   [5] RSX
++ *   [6] the user's ROM: found, byte order, checksum
++ *   [7] memory probe: where the heap, the stack and lv2 memory live
++ *   [8] result on screen until START or "Quit Game"
++ *   [9] clean shutdown
++ *
++ * If the screen stays black, the log says how far it got.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <dirent.h>
++
++#include <ppu-types.h>
++#include <ppu-lv2.h>
++#include <sys/thread.h>
++#include <sys/process.h>
++#include <sys/memory.h>
++#include <sysutil/sysutil.h>
++#include <lv2/systime.h>
++
++#include "ps3_log.h"
++#include "ps3_video.h"
++#include "ps3_pad.h"
++#include "ps3_rom.h"
++
++/* The loader reads this ELF section to size the primary thread's stack. */
++SYS_PROCESS_PARAM(1001, 0x100000);
++
++#define TITLE "MK64-PS3"
++
++static volatile int s_running = 1;
++
++static void sysutil_callback(u64 status, u64 param, void *userdata)
++{
++    (void)param;
++    (void)userdata;
++
++    if (status == SYSUTIL_EXIT_GAME) {
++        ps3_log("[sysutil] SYSUTIL_EXIT_GAME -> quitting");
++        s_running = 0;
++    }
++}
++
++static void list_dir(const char *path)
++{
++    DIR *d = opendir(path);
++    struct dirent *e;
++    int count = 0;
++
++    if (!d) {
++        ps3_logf("[fs] %s -> cannot open", path);
++        return;
++    }
++    while ((e = readdir(d)) != NULL) {
++        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
++        if (count < 24) ps3_logf("[fs]     %s", e->d_name);
++        count++;
++    }
++    closedir(d);
++    ps3_logf("[fs] %s -> %d entries", path, count);
++}
++
++/* The game's data comes from the ROM with 32-bit addresses inside (display
++ * lists, tables). The plan is to keep those structures in their N64 layout,
++ * which only works if everything the game can point at lives below 4 GB.
++ * This prints where each kind of memory really is on the console. */
++struct lv2_meminfo { u32 total; u32 avail; };
++
++static void probe_memory(void)
++{
++    static int in_data = 1;
++    static int in_bss;
++    int on_stack = 0;
++    void *small = malloc(64);
++    void *big = malloc(16 * 1024 * 1024);
++    sys_mem_addr_t lv2 = 0;
++    struct lv2_meminfo info = { 0, 0 };
++    s32 r;
++
++    ps3_logf("[mem] sizeof: void* %u, long %u, int %u, size_t %u",
++             (unsigned)sizeof(void *), (unsigned)sizeof(long), (unsigned)sizeof(int),
++             (unsigned)sizeof(size_t));
++    ps3_logf("[mem] code   %p", (void *)probe_memory);
++    ps3_logf("[mem] .data  %p", (void *)&in_data);
++    ps3_logf("[mem] .bss   %p", (void *)&in_bss);
++    ps3_logf("[mem] stack  %p", (void *)&on_stack);
++    ps3_logf("[mem] malloc(64)    %p", small);
++    ps3_logf("[mem] malloc(16 MB) %p", big);
++    ps3_logf("[mem] ROM (12 MB)   %p", (void *)PS3_Rom_Data());
++
++    r = sysMemoryAllocate(1024 * 1024, SYS_MEMORY_PAGE_SIZE_1M, &lv2);
++    ps3_logf("[mem] sysMemoryAllocate(1 MB) -> %d, addr 0x%08X", (int)r, (unsigned)lv2);
++    if (r == 0) sysMemoryFree(lv2);
++
++    lv2syscall1(352, (u64)(unsigned long)&info);
++    ps3_logf("[mem] lv2 user memory: %u KB free of %u KB", info.avail / 1024, info.total / 1024);
++
++    free(big);
++    free(small);
++    (void)in_bss;
++}
++
++static void game_thread(void *arg)
++{
++    static char l_file[160], l_crc[96], l_mem[96];
++    const char *lines[8];
++    int n = 0, rc, armed = 0;
++    const char *name;
++
++    (void)arg;
++
++    ps3_log("[1] game_thread started");
++
++    ps3_log("[2] registering the sysutil callback");
++    sysUtilRegisterCallback(0, sysutil_callback, NULL);
++
++    ps3_log("[3] filesystem");
++    list_dir(PS3_USRDIR);
++
++    ps3_log("[4] pad");
++    if (PS3_Pad_Init() < 0)
++        ps3_log("[4] WARNING: ioPadInit failed, going on without a pad");
++
++    ps3_log("[5] video");
++    if (PS3_Video_Init() < 0) {
++        ps3_log("[5] FATAL: could not start the RSX");
++        goto done;
++    }
++    ps3_logf("[5] video %ux%u", (unsigned)PS3_Video_Width(), (unsigned)PS3_Video_Height());
++
++    {
++        static const char *const wait[] = { "Reading the ROM..." };
++        PS3_Video_TextScreen(TITLE, wait, 1, -1);
++    }
++
++    ps3_log("[6] ROM");
++    rc = PS3_Rom_Load(PS3_USRDIR);
++    ps3_logf("[6] PS3_Rom_Load -> %d", rc);
++
++    name = strrchr(PS3_Rom_Path(), '/');
++    name = name ? name + 1 : PS3_Rom_Path();
++
++    switch (rc) {
++        case PS3_ROM_OK:
++            snprintf(l_file, sizeof(l_file), "File: %s", name);
++            snprintf(l_crc, sizeof(l_crc), "CRC32 %08X: Mario Kart 64 (USA)", (unsigned)PS3_Rom_Crc32());
++            lines[n++] = "ROM OK.";
++            lines[n++] = l_file;
++            lines[n++] = l_crc;
++            break;
++        case PS3_ROM_NOT_FOUND:
++            lines[n++] = "No ROM found.";
++            lines[n++] = "Copy your own Mario Kart 64 (USA) ROM to";
++            lines[n++] = PS3_USRDIR;
++            lines[n++] = "(.z64, .v64 or .n64)";
++            break;
++        case PS3_ROM_BAD_SIZE:
++        case PS3_ROM_BAD_GAME:
++            snprintf(l_file, sizeof(l_file), "File: %s", name);
++            snprintf(l_crc, sizeof(l_crc), "CRC32 %08X, expected %08X", (unsigned)PS3_Rom_Crc32(),
++                     (unsigned)PS3_ROM_CRC32);
++            lines[n++] = "This is not the Mario Kart 64 (USA) ROM.";
++            lines[n++] = l_file;
++            if (rc == PS3_ROM_BAD_GAME) lines[n++] = l_crc;
++            else lines[n++] = "The ROM must be 12 MB.";
++            break;
++        default:
++            lines[n++] = "The ROM could not be read. See mk64_log.txt.";
++            break;
++    }
++
++    ps3_log("[7] memory probe");
++    probe_memory();
++    {
++        struct lv2_meminfo info = { 0, 0 };
++        lv2syscall1(352, (u64)(unsigned long)&info);
++        snprintf(l_mem, sizeof(l_mem), "Free memory: %u MB of %u MB", info.avail >> 20, info.total >> 20);
++        lines[n++] = "";
++        lines[n++] = l_mem;
++    }
++    lines[n++] = "Stage 0 (no game yet). START: quit.";
++
++    ps3_log("[8] result on screen; START or PS button -> Quit Game");
++    while (s_running) {
++        u16 b;
++
++        PS3_Video_TextScreen(TITLE, lines, n, -1);
++        sysUtilCheckCallback();        /* without pumping the queue the event never arrives */
++        PS3_Pad_Frame();
++        b = PS3_Pad_Buttons();
++        /* release everything first (a button may come held from the XMB) */
++        if (!b) armed = 1;
++        else if (armed && (b & PAD_START)) {
++            ps3_log("[8] START -> quitting");
++            break;
++        }
++        usleep(30000);
++    }
++
++done:
++    ps3_log("[9] shutdown");
++    PS3_Video_Shutdown();              /* rsxFinish: the RSX reads nothing any more */
++    PS3_Pad_Shutdown();
++    ps3_log("[9] shutdown complete");
++    ps3_log_shutdown();
++
++    sysThreadExit(0);
++}
++
++int main(int argc, char **argv)
++{
++    sys_ppu_thread_t tid;
++    u64 exit_code;
++
++    (void)argc;
++    (void)argv;
++
++    ps3_log_init();
++    ps3_log("[0] main() reached -- the link is fine (-lrt -llv2 present)");
++
++    /* The EBOOT's default thread has a small stack: the real work goes in a
++     * thread of its own. */
++    if (sysThreadCreate(&tid, game_thread, NULL, 1000, 2 * 1024 * 1024,
++                        THREAD_JOINABLE, "mk64") != 0) {
++        ps3_log("[0] FATAL: sysThreadCreate failed");
++        ps3_log_shutdown();
++        return 1;
++    }
++
++    sysThreadJoin(tid, &exit_code);
++    return 0;
++}
+diff --git a/ps3/source/ps3_font.h b/ps3/source/ps3_font.h
+new file mode 100644
+index 0000000..64e834e
+--- /dev/null
++++ b/ps3/source/ps3_font.h
+@@ -0,0 +1,103 @@
++/* ps3_font.h -- fuente 8x16 (ASCII 32..126) para la pantalla de texto que se
++ * dibuja por CPU antes de que arranque el motor (conversion de la ROM).
++ * Generada desde DejaVu Sans Mono Bold (licencia libre, Bitstream Vera). */
++#ifndef PS3_FONT_H
++#define PS3_FONT_H
++static const unsigned char ps3_font8x16[95][16] = {
++    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* ' ' */
++    {0x00,0x00,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00}, /* '!' */
++    {0x00,0x00,0x66,0x66,0x66,0x66,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* '"' */
++    {0x00,0x00,0x1b,0x1b,0x12,0x7f,0x36,0x34,0xff,0x6c,0x6c,0x68,0x00,0x00,0x00,0x00}, /* '#' */
++    {0x00,0x08,0x08,0x3e,0x7a,0x68,0x7c,0x1e,0x0e,0x4f,0x6e,0x3c,0x08,0x08,0x00,0x00}, /* '$' */
++    {0x00,0x00,0x70,0xd8,0xd8,0x73,0x0c,0x30,0x47,0x0d,0x0d,0x07,0x00,0x00,0x00,0x00}, /* '%' */
++    {0x00,0x00,0x3c,0x30,0x70,0x30,0x78,0x79,0xcf,0xcf,0x67,0x3f,0x00,0x00,0x00,0x00}, /* '&' */
++    {0x00,0x00,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* "'" */
++    {0x00,0x0c,0x0c,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x0c,0x0c,0x00,0x00,0x00}, /* '(' */
++    {0x00,0x30,0x18,0x18,0x1c,0x0c,0x0c,0x0c,0x0c,0x1c,0x18,0x18,0x30,0x00,0x00,0x00}, /* ')' */
++    {0x00,0x00,0x08,0x7a,0x3e,0x3e,0x7a,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* star */
++    {0x00,0x00,0x00,0x18,0x18,0x18,0xff,0xff,0x18,0x18,0x18,0x00,0x00,0x00,0x00,0x00}, /* '+' */
++    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x18,0x10,0x00,0x00,0x00}, /* ',' */
++    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x3c,0x3c,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* '-' */
++    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x18,0x00,0x00,0x00,0x00}, /* '.' */
++    {0x00,0x00,0x03,0x06,0x06,0x0c,0x0c,0x08,0x18,0x10,0x30,0x30,0x60,0x60,0x00,0x00}, /* '/' */
++    {0x00,0x00,0x3c,0x76,0x66,0x67,0x7f,0x7f,0x67,0x66,0x76,0x3c,0x00,0x00,0x00,0x00}, /* '0' */
++    {0x00,0x00,0x3c,0x7c,0x1c,0x1c,0x1c,0x1c,0x1c,0x1c,0x1c,0x7f,0x00,0x00,0x00,0x00}, /* '1' */
++    {0x00,0x00,0x3c,0x46,0x06,0x06,0x0e,0x0c,0x18,0x38,0x70,0x7e,0x00,0x00,0x00,0x00}, /* '2' */
++    {0x00,0x00,0x3c,0x46,0x06,0x06,0x1c,0x06,0x07,0x07,0x46,0x3c,0x00,0x00,0x00,0x00}, /* '3' */
++    {0x00,0x00,0x0e,0x1e,0x1e,0x36,0x66,0x66,0x7f,0x06,0x06,0x06,0x00,0x00,0x00,0x00}, /* '4' */
++    {0x00,0x00,0x7e,0x60,0x60,0x7c,0x46,0x06,0x07,0x06,0x46,0x3c,0x00,0x00,0x00,0x00}, /* '5' */
++    {0x00,0x00,0x1e,0x32,0x60,0x7e,0x76,0x63,0x63,0x63,0x76,0x3c,0x00,0x00,0x00,0x00}, /* '6' */
++    {0x00,0x00,0x7e,0x06,0x06,0x0e,0x0c,0x1c,0x18,0x18,0x38,0x30,0x00,0x00,0x00,0x00}, /* '7' */
++    {0x00,0x00,0x3c,0x66,0x66,0x66,0x3c,0x66,0x63,0x63,0x66,0x3c,0x00,0x00,0x00,0x00}, /* '8' */
++    {0x00,0x00,0x3c,0x66,0x66,0x67,0x67,0x67,0x3f,0x06,0x46,0x3c,0x00,0x00,0x00,0x00}, /* '9' */
++    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00,0x00,0x00,0x00}, /* ':' */
++    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x10,0x00,0x00,0x00}, /* ';' */
++    {0x00,0x00,0x00,0x00,0x03,0x0f,0x7c,0x60,0x7c,0x0f,0x03,0x00,0x00,0x00,0x00,0x00}, /* '<' */
++    {0x00,0x00,0x00,0x00,0x7f,0x7f,0x00,0x00,0x7f,0x7f,0x00,0x00,0x00,0x00,0x00,0x00}, /* '=' */
++    {0x00,0x00,0x00,0x00,0x40,0x78,0x1e,0x07,0x1e,0x78,0x40,0x00,0x00,0x00,0x00,0x00}, /* '>' */
++    {0x00,0x00,0x3c,0x26,0x06,0x0e,0x1c,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00}, /* '?' */
++    {0x00,0x00,0x3e,0x63,0x43,0xcf,0xdb,0xd3,0xd3,0xdb,0xcf,0x40,0x33,0x1f,0x00,0x00}, /* '@' */
++    {0x00,0x00,0x1c,0x3c,0x3c,0x3e,0x36,0x66,0x7e,0x63,0x63,0xc3,0x00,0x00,0x00,0x00}, /* 'A' */
++    {0x00,0x00,0x7e,0x66,0x67,0x66,0x7e,0x67,0x63,0x63,0x67,0x7e,0x00,0x00,0x00,0x00}, /* 'B' */
++    {0x00,0x00,0x1e,0x30,0x70,0x60,0x60,0x60,0x60,0x70,0x30,0x1e,0x00,0x00,0x00,0x00}, /* 'C' */
++    {0x00,0x00,0x7c,0x66,0x67,0x63,0x63,0x63,0x63,0x67,0x66,0x7c,0x00,0x00,0x00,0x00}, /* 'D' */
++    {0x00,0x00,0x7f,0x60,0x60,0x60,0x7e,0x60,0x60,0x60,0x60,0x7f,0x00,0x00,0x00,0x00}, /* 'E' */
++    {0x00,0x00,0x7f,0x60,0x60,0x60,0x7e,0x60,0x60,0x60,0x60,0x60,0x00,0x00,0x00,0x00}, /* 'F' */
++    {0x00,0x00,0x1e,0x30,0x60,0x60,0x60,0x6f,0x63,0x63,0x33,0x1f,0x00,0x00,0x00,0x00}, /* 'G' */
++    {0x00,0x00,0x67,0x67,0x67,0x67,0x7f,0x67,0x67,0x67,0x67,0x67,0x00,0x00,0x00,0x00}, /* 'H' */
++    {0x00,0x00,0x7e,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x7e,0x00,0x00,0x00,0x00}, /* 'I' */
++    {0x00,0x00,0x3e,0x06,0x06,0x06,0x06,0x06,0x06,0x06,0x4e,0x7c,0x00,0x00,0x00,0x00}, /* 'J' */
++    {0x00,0x00,0x67,0x66,0x6c,0x78,0x78,0x7c,0x6e,0x66,0x67,0x63,0x00,0x00,0x00,0x00}, /* 'K' */
++    {0x00,0x00,0x70,0x70,0x70,0x70,0x70,0x70,0x70,0x70,0x70,0x7f,0x00,0x00,0x00,0x00}, /* 'L' */
++    {0x00,0x00,0xe7,0xf7,0xf7,0xff,0xdf,0xdb,0xc3,0xc3,0xc3,0xc3,0x00,0x00,0x00,0x00}, /* 'M' */
++    {0x00,0x00,0x63,0x73,0x73,0x73,0x7b,0x6b,0x6f,0x6f,0x67,0x67,0x00,0x00,0x00,0x00}, /* 'N' */
++    {0x00,0x00,0x3c,0x76,0x67,0x63,0x63,0x63,0x63,0x67,0x76,0x3c,0x00,0x00,0x00,0x00}, /* 'O' */
++    {0x00,0x00,0x7e,0x67,0x63,0x63,0x67,0x7e,0x60,0x60,0x60,0x60,0x00,0x00,0x00,0x00}, /* 'P' */
++    {0x00,0x00,0x3c,0x76,0x67,0x63,0x63,0x63,0x63,0x67,0x76,0x3e,0x06,0x02,0x00,0x00}, /* 'Q' */
++    {0x00,0x00,0x7c,0x66,0x67,0x67,0x66,0x7c,0x6e,0x66,0x67,0x63,0x00,0x00,0x00,0x00}, /* 'R' */
++    {0x00,0x00,0x3c,0x62,0x60,0x70,0x7c,0x1e,0x07,0x07,0x46,0x3c,0x00,0x00,0x00,0x00}, /* 'S' */
++    {0x00,0x00,0x7f,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00}, /* 'T' */
++    {0x00,0x00,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x66,0x3e,0x00,0x00,0x00,0x00}, /* 'U' */
++    {0x00,0x00,0xe3,0x63,0x67,0x66,0x66,0x36,0x36,0x3c,0x3c,0x1c,0x00,0x00,0x00,0x00}, /* 'V' */
++    {0x00,0x00,0xc1,0xc3,0xc3,0xdb,0xdb,0x7f,0x7f,0x77,0x77,0x66,0x00,0x00,0x00,0x00}, /* 'W' */
++    {0x00,0x00,0xe3,0x66,0x36,0x3c,0x1c,0x1c,0x3c,0x36,0x66,0xe3,0x00,0x00,0x00,0x00}, /* 'X' */
++    {0x00,0x00,0xe3,0x67,0x76,0x3e,0x3c,0x1c,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00}, /* 'Y' */
++    {0x00,0x00,0x7f,0x07,0x0e,0x0e,0x1c,0x3c,0x38,0x70,0x70,0x7f,0x00,0x00,0x00,0x00}, /* 'Z' */
++    {0x00,0x1c,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x1c,0x00,0x00,0x00}, /* '[' */
++    {0x00,0x00,0x60,0x60,0x30,0x30,0x10,0x18,0x08,0x0c,0x0c,0x06,0x06,0x03,0x00,0x00}, /* '\\' */
++    {0x00,0x3c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x3c,0x00,0x00,0x00}, /* ']' */
++    {0x00,0x00,0x1c,0x3c,0x76,0x63,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* '^' */
++    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0x00}, /* '_' */
++    {0x30,0x10,0x18,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* '`' */
++    {0x00,0x00,0x00,0x00,0x3e,0x66,0x07,0x3f,0x67,0x67,0x67,0x3f,0x00,0x00,0x00,0x00}, /* 'a' */
++    {0x00,0x60,0x60,0x60,0x7e,0x76,0x63,0x63,0x63,0x63,0x76,0x7e,0x00,0x00,0x00,0x00}, /* 'b' */
++    {0x00,0x00,0x00,0x00,0x1e,0x32,0x70,0x60,0x60,0x70,0x32,0x1e,0x00,0x00,0x00,0x00}, /* 'c' */
++    {0x00,0x07,0x07,0x07,0x3f,0x67,0x67,0x67,0x67,0x67,0x67,0x3f,0x00,0x00,0x00,0x00}, /* 'd' */
++    {0x00,0x00,0x00,0x00,0x3c,0x66,0x63,0x7f,0x60,0x60,0x73,0x3e,0x00,0x00,0x00,0x00}, /* 'e' */
++    {0x00,0x0f,0x18,0x18,0x7f,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00}, /* 'f' */
++    {0x00,0x00,0x00,0x00,0x3f,0x67,0x67,0x67,0x67,0x67,0x67,0x3f,0x06,0x46,0x3c,0x00}, /* 'g' */
++    {0x00,0x60,0x60,0x60,0x7e,0x76,0x66,0x66,0x66,0x66,0x66,0x66,0x00,0x00,0x00,0x00}, /* 'h' */
++    {0x00,0x1c,0x1c,0x00,0x7c,0x1c,0x1c,0x1c,0x1c,0x1c,0x1c,0x7f,0x00,0x00,0x00,0x00}, /* 'i' */
++    {0x00,0x0c,0x0c,0x00,0x3c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x0c,0x1c,0x78,0x00}, /* 'j' */
++    {0x00,0x60,0x60,0x60,0x67,0x6e,0x7c,0x7c,0x7c,0x6e,0x66,0x63,0x00,0x00,0x00,0x00}, /* 'k' */
++    {0x00,0x78,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x1f,0x00,0x00,0x00,0x00}, /* 'l' */
++    {0x00,0x00,0x00,0x00,0xfe,0xdb,0xdb,0xdb,0xdb,0xdb,0xdb,0xdb,0x00,0x00,0x00,0x00}, /* 'm' */
++    {0x00,0x00,0x00,0x00,0x7e,0x76,0x66,0x66,0x66,0x66,0x66,0x66,0x00,0x00,0x00,0x00}, /* 'n' */
++    {0x00,0x00,0x00,0x00,0x3c,0x66,0x67,0x63,0x63,0x67,0x66,0x3c,0x00,0x00,0x00,0x00}, /* 'o' */
++    {0x00,0x00,0x00,0x00,0x7e,0x76,0x63,0x63,0x63,0x63,0x76,0x7e,0x60,0x60,0x60,0x00}, /* 'p' */
++    {0x00,0x00,0x00,0x00,0x3f,0x67,0x67,0x67,0x67,0x67,0x67,0x3f,0x07,0x07,0x07,0x00}, /* 'q' */
++    {0x00,0x00,0x00,0x00,0x3f,0x39,0x30,0x30,0x30,0x30,0x30,0x30,0x00,0x00,0x00,0x00}, /* 'r' */
++    {0x00,0x00,0x00,0x00,0x3c,0x62,0x70,0x7c,0x1e,0x06,0x46,0x3c,0x00,0x00,0x00,0x00}, /* 's' */
++    {0x00,0x00,0x18,0x18,0x7e,0x18,0x18,0x18,0x18,0x18,0x18,0x1e,0x00,0x00,0x00,0x00}, /* 't' */
++    {0x00,0x00,0x00,0x00,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x3e,0x00,0x00,0x00,0x00}, /* 'u' */
++    {0x00,0x00,0x00,0x00,0x63,0x67,0x66,0x36,0x36,0x3c,0x3c,0x1c,0x00,0x00,0x00,0x00}, /* 'v' */
++    {0x00,0x00,0x00,0x00,0xc1,0xc3,0xdb,0xdb,0x7f,0x7f,0x76,0x66,0x00,0x00,0x00,0x00}, /* 'w' */
++    {0x00,0x00,0x00,0x00,0x67,0x36,0x3c,0x1c,0x1c,0x3c,0x76,0x67,0x00,0x00,0x00,0x00}, /* 'x' */
++    {0x00,0x00,0x00,0x00,0xe3,0x67,0x66,0x36,0x3e,0x3c,0x1c,0x1c,0x18,0x18,0x70,0x00}, /* 'y' */
++    {0x00,0x00,0x00,0x00,0x7e,0x06,0x0e,0x1c,0x38,0x38,0x70,0x7e,0x00,0x00,0x00,0x00}, /* 'z' */
++    {0x00,0x0e,0x1c,0x18,0x18,0x18,0x18,0x70,0x18,0x18,0x18,0x18,0x1c,0x0e,0x00,0x00}, /* '{' */
++    {0x00,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, /* '|' */
++    {0x00,0x78,0x18,0x18,0x18,0x18,0x1c,0x0e,0x1c,0x18,0x18,0x18,0x18,0x78,0x00,0x00}, /* '}' */
++    {0x00,0x00,0x00,0x00,0x00,0x00,0x79,0x7f,0x0e,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* '~' */
++};
++#endif
+diff --git a/ps3/source/ps3_log.c b/ps3/source/ps3_log.c
+new file mode 100644
+index 0000000..bce82b1
+--- /dev/null
++++ b/ps3/source/ps3_log.c
+@@ -0,0 +1,89 @@
++/* ps3_log.c -- logging a archivo.
++ *
++ * En PS3 no hay consola: si algo falla el sintoma es pantalla negra y vuelta
++ * al XMB sin mensaje. El log es la unica fuente. Por eso se abre lo antes
++ * posible y se hace fflush en cada linea (un crash no debe perder la ultima
++ * linea, que es justamente la que dice donde se murio).
++ */
++
++#include <stdio.h>
++#include <stdarg.h>
++#include <string.h>
++
++#include "ps3_log.h"
++
++#ifndef PS3_PATCHLEVEL
++#define PS3_PATCHLEVEL 0
++#endif
++
++/* Varios hilos escriben (juego, audio): una linea a la vez. */
++#ifdef __PPU__
++#include <sys/mutex.h>
++static sys_mutex_t s_lmtx;
++static int s_lmtx_ok = 0;
++static void log_lock_init(void)
++{
++    sys_mutex_attr_t a;
++    memset(&a, 0, sizeof(a));
++    a.attr_protocol  = SYS_MUTEX_PROTOCOL_PRIO;
++    a.attr_recursive = SYS_MUTEX_ATTR_NOT_RECURSIVE;
++    a.attr_pshared   = SYS_MUTEX_ATTR_NOT_PSHARED;
++    a.attr_adaptive  = SYS_MUTEX_ATTR_NOT_ADAPTIVE;
++    strcpy(a.name, "mk64log");
++    s_lmtx_ok = (sysMutexCreate(&s_lmtx, &a) == 0);
++}
++#define LOG_LOCK()   do { if (s_lmtx_ok) sysMutexLock(s_lmtx, 0); } while (0)
++#define LOG_UNLOCK() do { if (s_lmtx_ok) sysMutexUnlock(s_lmtx); } while (0)
++#else
++#include <pthread.h>
++static pthread_mutex_t s_lmtx = PTHREAD_MUTEX_INITIALIZER;
++static void log_lock_init(void) { }
++#define LOG_LOCK()   pthread_mutex_lock(&s_lmtx)
++#define LOG_UNLOCK() pthread_mutex_unlock(&s_lmtx)
++#endif
++
++static FILE *s_log = NULL;
++
++void ps3_log_init(void)
++{
++    if (s_log) return;
++
++    log_lock_init();
++    s_log = fopen(PS3_USRDIR "/mk64_log.txt", "w");
++
++    /* Si USRDIR fallara, no hay nada mas que hacer: se sigue sin log. */
++    if (s_log) {
++        fprintf(s_log, "=== mk64-ps3 log -- patch %d ===\n", PS3_PATCHLEVEL);
++        fflush(s_log);
++    }
++}
++
++void ps3_log(const char *msg)
++{
++    if (!s_log) return;
++    LOG_LOCK();
++    fputs(msg, s_log);
++    fputc('\n', s_log);
++    fflush(s_log);   /* obligatorio: sin esto un crash se lleva la ultima linea */
++    LOG_UNLOCK();
++}
++
++void ps3_logf(const char *fmt, ...)
++{
++    char buf[512];
++    va_list ap;
++
++    va_start(ap, fmt);
++    vsnprintf(buf, sizeof(buf), fmt, ap);
++    va_end(ap);
++
++    ps3_log(buf);
++}
++
++void ps3_log_shutdown(void)
++{
++    if (!s_log) return;
++    ps3_log("=== fin ===");
++    fclose(s_log);
++    s_log = NULL;
++}
+diff --git a/ps3/source/ps3_log.h b/ps3/source/ps3_log.h
+new file mode 100644
+index 0000000..7ef0111
+--- /dev/null
++++ b/ps3/source/ps3_log.h
+@@ -0,0 +1,17 @@
++/* ps3_log.h -- logging a archivo, la unica fuente de diagnostico en PS3.
++ *
++ * mk64-ps3 -- port de Mario Kart 64 (decomp n64decomp/mk64) a PS3 homebrew.
++ */
++
++#ifndef PS3_LOG_H
++#define PS3_LOG_H
++
++/* Ruta del log. USRDIR siempre es escribible; /dev_hdd0/data/ se prueba aparte. */
++#define PS3_USRDIR      "/dev_hdd0/game/MK64PS300/USRDIR"
++
++void ps3_log_init(void);
++void ps3_log(const char *msg);
++void ps3_logf(const char *fmt, ...);
++void ps3_log_shutdown(void);
++
++#endif /* PS3_LOG_H */
+diff --git a/ps3/source/ps3_pad.c b/ps3/source/ps3_pad.c
+new file mode 100644
+index 0000000..eb7d17e
+--- /dev/null
++++ b/ps3/source/ps3_pad.c
+@@ -0,0 +1,231 @@
++/* ps3_pad.c -- DualShock 3 via ioPad.
++ *
++ * Deteccion de flanco incluida desde el arranque: el throttle tipico de los
++ * motores (joywait) solo limita la repeticion a ~7 por segundo, asi que
++ * mantener un boton apretado atraviesa varios menus. Las direcciones SI
++ * quedan level-triggered a proposito (repetir es lo que uno quiere al
++ * scrollear una lista).
++ *
++ * El puerto activo se re-resuelve cada frame: una reconexion USB/BT puede
++ * caer en un puerto distinto al anterior.
++ */
++
++#include <string.h>
++#include <io/pad.h>
++
++#include "ps3_pad.h"
++#include "ps3_log.h"
++
++#define STICK_CENTER    128
++static int s_deadzone = 24;     /* ~24 sobre 128; Opciones > Gamepad */
++#define NUM_PAD_PORTS   7       /* literal a proposito: MAX_PADS no es portable */
++
++static padInfo2 s_info;
++static padData  s_data;
++
++static int s_connected = 0;
++static int s_port      = -1;    /* -1 = ninguno */
++
++static u16 s_buttons  = 0;
++static u16 s_prev     = 0;
++
++static int s_lx = 0, s_ly = 0, s_rx = 0, s_ry = 0;
++
++static int s_fail   = 0;        /* ioPadGetData fallando seguido */
++static int s_nopad  = 0;        /* frames sin ningun mando */
++static int s_rumble_reset = 0;  /* avisa a PS3_Pad_Rumble que olvide su estado */
++
++static int apply_deadzone(int raw)
++{
++    int v = raw - STICK_CENTER;
++    if (v > -s_deadzone && v < s_deadzone) return 0;
++    /* reescalar para que el recorrido util siga llegando a +-127 */
++    if (v > 0) v = (v - s_deadzone) * 127 / (127 - s_deadzone);
++    else       v = (v + s_deadzone) * 128 / (128 - s_deadzone);
++    return v;
++}
++
++static void release_all(void)
++{
++    s_buttons = 0;
++    s_lx = s_ly = s_rx = s_ry = 0;
++    /* s_data se relee aunque un poll venga con len==0: dejarlo "en reposo"
++     * (sticks al centro, nada apretado), no en cero (cero = stick a fondo). */
++    memset(&s_data, 0, sizeof(s_data));
++    s_data.button[4] = s_data.button[5] = STICK_CENTER;
++    s_data.button[6] = s_data.button[7] = STICK_CENTER;
++}
++
++int PS3_Pad_Init(void)
++{
++    s32 ret = ioPadInit(7);
++    ps3_logf("[pad] ioPadInit ret=%d", (int)ret);
++    if (ret < 0) return -1;
++
++    memset(&s_info, 0, sizeof(s_info));
++    release_all();
++    s_prev = 0;
++    s_port = -1;
++    s_connected = 0;
++    return 0;
++}
++
++void PS3_Pad_Shutdown(void)
++{
++    ioPadEnd();
++}
++
++/* Ultimo recurso: reiniciar la libreria de pads (lo mismo que hace el port
++ * de ECWolf al cerrar y reabrir el joystick de SDL cuando queda colgado). */
++static void pad_reinit(const char *why)
++{
++    s32 a = ioPadEnd();
++    s32 b = ioPadInit(7);
++    ps3_logf("[pad] reinicio de ioPad (%s): end=%d init=%d", why, (int)a, (int)b);
++    s_port = -1;
++    s_fail = 0;
++    s_nopad = 0;
++    s_rumble_reset = 1;
++    release_all();
++}
++
++void PS3_Pad_Frame(void)
++{
++    static u32 last_status[MAX_PORT_NUM];
++    static int info_calls = 0;
++    int i, port = -1;
++    s32 ri;
++
++    s_prev = s_buttons;
++
++    /* ioPadGetInfo2 (no la vieja ioPadGetInfo): trae el estado por PUERTO,
++     * bit 0 = conectado, bit 1 = "cambio la asignacion" (el mando se apago
++     * y volvio, o cambio de puerto). */
++    ri = ioPadGetInfo2(&s_info);
++    info_calls++;
++    if (info_calls <= 1)
++        ps3_logf("[pad] info %d: ret=%d conectados=%u info=0x%x status=%x %x %x %x",
++                 info_calls, (int)ri, (unsigned)s_info.connected, (unsigned)s_info.info,
++                 (unsigned)s_info.port_status[0], (unsigned)s_info.port_status[1],
++                 (unsigned)s_info.port_status[2], (unsigned)s_info.port_status[3]);
++    if (ri < 0) {
++        if (s_connected) ps3_logf("[pad] ioPadGetInfo2 fallo (%d): mando perdido", (int)ri);
++        s_connected = 0;
++        release_all();
++        if (++s_nopad == 300) pad_reinit("GetInfo2 fallando");
++        return;
++    }
++
++    /* Log de cada cambio de estado de cada puerto: asi se ve en el log
++     * exactamente que pasa al apagar y prender el mando. */
++    for (i = 0; i < MAX_PORT_NUM; i++) {
++        if (s_info.port_status[i] != last_status[i]) {
++            ps3_logf("[pad] puerto %d: status 0x%x -> 0x%x (tipo %u, capacidad 0x%x)",
++                     i, (unsigned)last_status[i], (unsigned)s_info.port_status[i],
++                     (unsigned)s_info.device_type[i], (unsigned)s_info.device_capability[i]);
++            last_status[i] = s_info.port_status[i];
++        }
++        /* Cambio de asignacion: vaciar el buffer viejo de ese puerto. */
++        if (s_info.port_status[i] & 2)
++            ioPadClearBuf(i);
++    }
++
++    /* Puerto activo: se mantiene el actual mientras siga conectado; si no,
++     * el primer mando conectado (una reconexion puede caer en otro puerto). */
++    if (s_port >= 0 && (s_info.port_status[s_port] & 1))
++        port = s_port;
++    else
++        for (i = 0; i < MAX_PORT_NUM; i++)
++            if (s_info.port_status[i] & 1) { port = i; break; }
++
++    if (port < 0) {
++        if (s_connected) ps3_logf("[pad] sin mandos conectados");
++        s_connected = 0;
++        s_port = -1;
++        release_all();
++        s_nopad++;
++        return;
++    }
++
++    if (!s_connected || port != s_port) {
++        ps3_logf("[pad] mando activo en puerto %d (antes %d)%s", port, s_port,
++                 s_nopad > 0 ? " -- reconectado" : "");
++        ioPadClearBuf(port);
++        release_all();
++        s_rumble_reset = 1;
++        s_fail = 0;
++    }
++    s_port = port;
++    s_connected = 1;
++    s_nopad = 0;
++
++    {
++        s32 r = ioPadGetData(s_port, &s_data);
++        static int calls = 0, logged_first = 0;
++        calls++;
++        if (calls <= 1)
++            ps3_logf("[pad] poll %d: ret=%d puerto=%d status=0x%x len=%d botones=%02x%02x",
++                     calls, (int)r, s_port, (unsigned)s_info.port_status[s_port],
++                     (int)s_data.len, (unsigned)s_data.button[2], (unsigned)s_data.button[3]);
++        if (r != 0) {
++            if (s_fail < 5) ps3_logf("[pad] ioPadGetData(%d) = %d", s_port, (int)r);
++            /* Colgado varios segundos con el mando "conectado": reiniciar. */
++            if (++s_fail == 180) pad_reinit("GetData fallando");
++            return;     /* conservar el estado anterior, no soltar los botones */
++        }
++        if (s_fail) ps3_logf("[pad] GetData volvio a andar tras %d fallos", s_fail);
++        s_fail = 0;
++        if (!logged_first && ((s_data.button[2] | s_data.button[3]) & 0xff)) {
++            logged_first = 1;
++            ps3_logf("[pad] primer boton recibido (poll %d): %02x%02x", calls,
++                     (unsigned)s_data.button[2], (unsigned)s_data.button[3]);
++        }
++    }
++
++    /* OJO: NO hacer bail si len==0. s_data conserva los valores del poll
++     * anterior, y saltear la lectura congela el cursor a 60fps. */
++
++    s_buttons = (u16)((s_data.button[2] << 8) | s_data.button[3]);
++
++    s_rx = apply_deadzone(s_data.button[4]);
++    s_ry = apply_deadzone(s_data.button[5]);
++    s_lx = apply_deadzone(s_data.button[6]);
++    s_ly = apply_deadzone(s_data.button[7]);
++}
++
++u16 PS3_Pad_Buttons(void)   { return s_buttons; }
++int PS3_Pad_Connected(void) { return s_connected; }
++
++int PS3_Pad_Pressed(u16 mask)
++{
++    return (s_buttons & mask) && !(s_prev & mask);
++}
++
++int PS3_Pad_LeftX(void)  { return s_lx; }
++int PS3_Pad_LeftY(void)  { return s_ly; }
++int PS3_Pad_RightX(void) { return s_rx; }
++int PS3_Pad_RightY(void) { return s_ry; }
++
++void PS3_Pad_SetDeadzone(int dz)
++{
++    if (dz < 0) dz = 0;
++    if (dz > 100) dz = 100;
++    s_deadzone = dz;
++}
++
++/* Vibracion del DS3: motor chico on/off, motor grande 0..255. */
++void PS3_Pad_Rumble(int small_on, int big_level)
++{
++    static int last_small = -1, last_big = -1;
++    padActParam p;
++    if (!s_connected || s_port < 0) return;
++    if (s_rumble_reset) { s_rumble_reset = 0; last_small = last_big = -1; }
++    if (last_small < 0 && !small_on && !big_level) return;   /* nunca vibro: no tocar */
++    if (small_on == last_small && big_level == last_big) return;
++    last_small = small_on;
++    last_big = big_level;
++    memset(&p, 0, sizeof(p));
++    p.small_motor = small_on ? 1 : 0;
++    p.large_motor = (u8)(big_level < 0 ? 0 : (big_level > 255 ? 255 : big_level));
++    ioPadSetActDirect(s_port, &p);
++}
+diff --git a/ps3/source/ps3_pad.h b/ps3/source/ps3_pad.h
+new file mode 100644
+index 0000000..5b1eb20
+--- /dev/null
++++ b/ps3/source/ps3_pad.h
+@@ -0,0 +1,50 @@
++/* ps3_pad.h -- DualShock 3 via ioPad.
++ *
++ * Layout de paddata.button[], confirmado contra TyrQuakeCell:
++ *   [2],[3]  digitales, bitmask de 16 bits partido en dos bytes
++ *   [4],[5]  stick derecho X, Y   (0-255, 128 centrado)
++ *   [6],[7]  stick izquierdo X, Y
++ */
++
++#ifndef PS3_PAD_H
++#define PS3_PAD_H
++
++#include <ppu-types.h>
++
++#define PAD_LEFT      0x8000
++#define PAD_DOWN      0x4000
++#define PAD_RIGHT     0x2000
++#define PAD_UP        0x1000
++#define PAD_START     0x0800
++#define PAD_R3        0x0400
++#define PAD_L3        0x0200
++#define PAD_SELECT    0x0100
++#define PAD_SQUARE    0x0080
++#define PAD_CROSS     0x0040
++#define PAD_CIRCLE    0x0020
++#define PAD_TRIANGLE  0x0010
++#define PAD_R1        0x0008
++#define PAD_L1        0x0004
++#define PAD_R2        0x0002
++#define PAD_L2        0x0001
++
++int  PS3_Pad_Init(void);
++void PS3_Pad_Shutdown(void);
++
++/* Llamar una vez por frame antes de consultar el estado. */
++void PS3_Pad_Frame(void);
++
++u16  PS3_Pad_Buttons(void);              /* estado actual (level) */
++int  PS3_Pad_Pressed(u16 mask);          /* flanco de bajada->subida */
++int  PS3_Pad_Connected(void);
++
++/* Sticks ya con deadzone aplicada, rango -127..127 */
++int  PS3_Pad_LeftX(void);
++int  PS3_Pad_LeftY(void);
++int  PS3_Pad_RightX(void);
++int  PS3_Pad_RightY(void);
++
++void PS3_Pad_SetDeadzone(int dz);             /* 0..100 sobre 128 */
++void PS3_Pad_Rumble(int small_on, int big_level);
++
++#endif /* PS3_PAD_H */
+diff --git a/ps3/source/ps3_rom.c b/ps3/source/ps3_rom.c
+new file mode 100644
+index 0000000..02d8fc3
+--- /dev/null
++++ b/ps3/source/ps3_rom.c
+@@ -0,0 +1,174 @@
++/* ps3_rom.c -- see ps3_rom.h. */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++#include <dirent.h>
++#include <sys/stat.h>
++
++#include "ps3_rom.h"
++#include "ps3_log.h"
++
++static uint8_t *s_rom;
++static char     s_path[1280];
++static uint32_t s_crc;
++
++const uint8_t *PS3_Rom_Data(void)  { return s_rom; }
++const char    *PS3_Rom_Path(void)  { return s_path; }
++uint32_t       PS3_Rom_Crc32(void) { return s_crc; }
++
++int PS3_Rom_Read(void *dst, uint32_t off, uint32_t size)
++{
++    if (!s_rom || off > PS3_ROM_SIZE || size > PS3_ROM_SIZE - off) {
++        ps3_logf("[rom] read outside the ROM: off 0x%X size 0x%X", off, size);
++        return -1;
++    }
++    memcpy(dst, s_rom + off, size);
++    return 0;
++}
++
++static uint32_t crc32_buf(const uint8_t *p, size_t n)
++{
++    static uint32_t table[256];
++    uint32_t c = 0xFFFFFFFFu;
++    size_t i;
++
++    if (!table[1]) {
++        uint32_t k;
++        int j;
++        for (k = 0; k < 256; k++) {
++            uint32_t v = k;
++            for (j = 0; j < 8; j++) v = (v & 1) ? 0xEDB88320u ^ (v >> 1) : v >> 1;
++            table[k] = v;
++        }
++    }
++    for (i = 0; i < n; i++) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
++    return c ^ 0xFFFFFFFFu;
++}
++
++/* 1 = .z64 (big-endian, what the game expects), 2 = .v64 (bytes swapped in
++ * pairs), 3 = .n64 (little-endian words), 0 = not an N64 ROM. */
++static int rom_byte_order(const uint8_t *h)
++{
++    if (h[0] == 0x80 && h[1] == 0x37 && h[2] == 0x12 && h[3] == 0x40) return 1;
++    if (h[0] == 0x37 && h[1] == 0x80 && h[2] == 0x40 && h[3] == 0x12) return 2;
++    if (h[0] == 0x40 && h[1] == 0x12 && h[2] == 0x37 && h[3] == 0x80) return 3;
++    return 0;
++}
++
++static int has_ext(const char *name, const char *ext)
++{
++    size_t a = strlen(name), b = strlen(ext);
++    return a > b && !strcasecmp(name + a - b, ext);
++}
++
++static int header_order(const char *path)
++{
++    uint8_t h[4];
++    int order = 0;
++    FILE *f = fopen(path, "rb");
++    if (!f) return 0;
++    if (fread(h, 1, 4, f) == 4) order = rom_byte_order(h);
++    fclose(f);
++    return order;
++}
++
++/* By extension first; otherwise any file whose first four bytes are an N64
++ * header in one of the three byte orders. */
++static int find_rom(const char *dir, char *out, size_t outsz)
++{
++    DIR *d = opendir(dir);
++    struct dirent *e;
++    int found = 0;
++
++    if (!d) return 0;
++    while (!found && (e = readdir(d)) != NULL) {
++        if (has_ext(e->d_name, ".z64") || has_ext(e->d_name, ".v64") || has_ext(e->d_name, ".n64")) {
++            snprintf(out, outsz, "%s/%s", dir, e->d_name);
++            found = 1;
++        }
++    }
++    if (!found) {
++        rewinddir(d);
++        while (!found && (e = readdir(d)) != NULL) {
++            char p[1280];
++            struct stat st;
++            if (e->d_name[0] == '.') continue;
++            snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
++            if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0x1000) continue;
++            if (header_order(p)) {
++                snprintf(out, outsz, "%s", p);
++                found = 1;
++            }
++        }
++    }
++    closedir(d);
++    return found;
++}
++
++int PS3_Rom_Load(const char *dir)
++{
++    struct stat st;
++    uint8_t *buf;
++    FILE *f;
++    size_t got;
++    uint32_t i;
++    int order;
++
++    if (s_rom) return PS3_ROM_OK;
++    s_path[0] = 0;
++    s_crc = 0;
++
++    if (!find_rom(dir, s_path, sizeof(s_path))) {
++        ps3_logf("[rom] no .z64/.v64/.n64 and no file with an N64 header in %s", dir);
++        return PS3_ROM_NOT_FOUND;
++    }
++    if (stat(s_path, &st) != 0) return PS3_ROM_READ_ERR;
++    ps3_logf("[rom] %s, %u bytes", s_path, (unsigned)st.st_size);
++    if ((uint32_t)st.st_size != PS3_ROM_SIZE) return PS3_ROM_BAD_SIZE;
++
++    buf = (uint8_t *)malloc(PS3_ROM_SIZE);
++    if (!buf) {
++        ps3_log("[rom] malloc of 12 MB failed");
++        return PS3_ROM_NO_MEMORY;
++    }
++    f = fopen(s_path, "rb");
++    if (!f) { free(buf); return PS3_ROM_READ_ERR; }
++    got = fread(buf, 1, PS3_ROM_SIZE, f);
++    fclose(f);
++    if (got != PS3_ROM_SIZE) {
++        ps3_logf("[rom] short read: %u of %u bytes", (unsigned)got, PS3_ROM_SIZE);
++        free(buf);
++        return PS3_ROM_READ_ERR;
++    }
++
++    order = rom_byte_order(buf);
++    ps3_logf("[rom] byte order: %s",
++             order == 1 ? ".z64 (as is)" : order == 2 ? ".v64 (swapping pairs)" :
++             order == 3 ? ".n64 (swapping words)" : "not an N64 ROM");
++    if (order == 2) {
++        for (i = 0; i < PS3_ROM_SIZE; i += 2) {
++            uint8_t t = buf[i]; buf[i] = buf[i + 1]; buf[i + 1] = t;
++        }
++    } else if (order == 3) {
++        for (i = 0; i < PS3_ROM_SIZE; i += 4) {
++            uint8_t a = buf[i], b = buf[i + 1];
++            buf[i] = buf[i + 3]; buf[i + 1] = buf[i + 2]; buf[i + 2] = b; buf[i + 3] = a;
++        }
++    } else if (order != 1) {
++        free(buf);
++        return PS3_ROM_BAD_GAME;
++    }
++
++    s_crc = crc32_buf(buf, PS3_ROM_SIZE);
++    ps3_logf("[rom] internal name \"%.20s\", game code %.4s, version %u, crc32 %08X (expected %08X)",
++             (const char *)buf + 0x20, (const char *)buf + 0x3B, buf[0x3F], s_crc, PS3_ROM_CRC32);
++    if (s_crc != PS3_ROM_CRC32) {
++        free(buf);
++        return PS3_ROM_BAD_GAME;
++    }
++
++    s_rom = buf;
++    return PS3_ROM_OK;
++}
+diff --git a/ps3/source/ps3_rom.h b/ps3/source/ps3_rom.h
+new file mode 100644
+index 0000000..904aeaa
+--- /dev/null
++++ b/ps3/source/ps3_rom.h
+@@ -0,0 +1,38 @@
++/* ps3_rom.h -- the user's Mario Kart 64 ROM, loaded whole into memory.
++ *
++ * The PKG ships no game data. Every asset (courses, textures, models, audio)
++ * is read at run time from the ROM the user copies to USRDIR. The N64 is
++ * big-endian like the PS3, so the bytes are used as they are.
++ */
++
++#ifndef PS3_ROM_H
++#define PS3_ROM_H
++
++#include <stdint.h>
++
++#define PS3_ROM_SIZE   0xC00000u          /* 12 MB */
++#define PS3_ROM_CRC32  0x434389C1u        /* Mario Kart 64 (USA), .z64 order */
++
++enum {
++    PS3_ROM_OK = 0,
++    PS3_ROM_NOT_FOUND = -1,   /* nothing that looks like an N64 ROM in USRDIR */
++    PS3_ROM_BAD_SIZE  = -2,   /* an N64 ROM, but not 12 MB */
++    PS3_ROM_BAD_GAME  = -3,   /* 12 MB N64 ROM, but not Mario Kart 64 (USA) */
++    PS3_ROM_NO_MEMORY = -4,
++    PS3_ROM_READ_ERR  = -5
++};
++
++/* Finds the ROM in `dir` (by extension .z64/.v64/.n64, or by its N64 header),
++ * loads it, puts it in .z64 byte order and checks that it is the USA
++ * release. Returns PS3_ROM_OK or one of the errors above. */
++int PS3_Rom_Load(const char *dir);
++
++const uint8_t *PS3_Rom_Data(void);        /* NULL until PS3_Rom_Load succeeds */
++const char    *PS3_Rom_Path(void);        /* file that was picked, "" if none */
++uint32_t       PS3_Rom_Crc32(void);       /* of the file that was read */
++
++/* What osPiStartDma becomes: copies `size` bytes at ROM offset `off`.
++ * Returns 0, or -1 when the range is outside the ROM. */
++int PS3_Rom_Read(void *dst, uint32_t off, uint32_t size);
++
++#endif /* PS3_ROM_H */
+diff --git a/ps3/source/ps3_video.c b/ps3/source/ps3_video.c
+new file mode 100644
+index 0000000..ce89a5e
+--- /dev/null
++++ b/ps3/source/ps3_video.c
+@@ -0,0 +1,388 @@
++/* ps3_video.c -- RSX/GCM: init, framebuffers, surface y flip.
++ *
++ * Patron tomado de IoQuake3-PS3 (code/sys/ps3_glimp.c), que es codigo probado
++ * en hardware. Todavia NO hay shaders ni geometria: esta etapa solo valida que
++ * el RSX arranca, que el surface queda bien configurado y que el flip corre.
++ *
++ * Trampas ya contempladas (ver resumen de traspaso):
++ *  - Init idempotente: rsxInit dos veces filtra el contexto anterior.
++ *  - Shutdown: gcmSetFlipHandler(NULL) PRIMERO, despues rsxFree.
++ *  - Compilar este archivo a -O1 -fno-inline (ver Makefile): los syscall stubs
++ *    de PSL1GHT son simbolos de indireccion de datos, no funciones normales, y
++ *    el inlining agresivo rompe su resolucion en link.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <malloc.h>
++
++#include <ppu-types.h>
++#include <rsx/rsx.h>
++#include <rsx/gcm_sys.h>
++#include <sysutil/video.h>
++
++#include "ps3_video.h"
++#include "ps3_log.h"
++#include "ps3_font.h"
++
++/* Triple buffer: con 3 buffers siempre hay uno libre para la CPU. */
++#define RSX_FB_COUNT    3
++#define RSX_FB_ALIGN    64
++#define RSX_CB_SIZE     (1 * 1024 * 1024)    /* command buffer */
++#define RSX_HOST_SIZE   (32 * 1024 * 1024)   /* IO buffer */
++
++static gcmContextData *s_ctx = NULL;
++static int   s_ready = 0;               /* guard de idempotencia */
++
++static u32   s_width  = 1280;
++static u32   s_height = 720;
++static u32   s_pitch  = 0;
++
++static u32  *s_color_buffer[RSX_FB_COUNT];
++static u32   s_color_offset[RSX_FB_COUNT];
++static u32  *s_depth_buffer = NULL;
++static u32   s_depth_offset = 0;
++
++static int   s_cur_fb = 0;
++static int   s_cur_rt = -1;
++
++static volatile u32 s_flip_queued    = 0;
++static volatile u32 s_flip_completed = 0;
++
++static void flip_handler(const u32 head)
++{
++    (void)head;
++    s_flip_completed++;
++}
++
++static void set_render_target(int index)
++{
++    gcmSurface sf;
++    int i;
++
++    if (index == s_cur_rt) return;
++    s_cur_rt = index;
++
++    memset(&sf, 0, sizeof(sf));
++
++    sf.colorFormat      = GCM_SURFACE_A8R8G8B8;
++    sf.colorTarget      = GCM_SURFACE_TARGET_0;
++    sf.colorLocation[0] = GCM_LOCATION_RSX;
++    sf.colorOffset[0]   = s_color_offset[index];
++    sf.colorPitch[0]    = s_pitch;
++
++    for (i = 1; i < 4; i++) {
++        sf.colorLocation[i] = GCM_LOCATION_RSX;
++        sf.colorOffset[i]   = s_color_offset[index];
++        sf.colorPitch[i]    = 64;
++    }
++
++    sf.depthFormat   = GCM_SURFACE_ZETA_Z24S8;
++    sf.depthLocation = GCM_LOCATION_RSX;
++    sf.depthOffset   = s_depth_offset;
++    sf.depthPitch    = s_width * 4;
++
++    sf.type      = GCM_SURFACE_TYPE_LINEAR;
++    sf.antiAlias = GCM_SURFACE_CENTER_1;
++
++    sf.width  = s_width;
++    sf.height = s_height;
++    sf.x = 0;
++    sf.y = 0;
++
++    rsxSetSurface(s_ctx, &sf);
++}
++
++static int alloc_framebuffers(void)
++{
++    u32 color_size, depth_size;
++    int i;
++
++    s_pitch    = s_width * 4;                  /* ARGB8888 */
++    color_size = s_pitch * s_height;
++    depth_size = s_width * s_height * 4;       /* Z24S8 */
++
++    for (i = 0; i < RSX_FB_COUNT; i++) {
++        s_color_buffer[i] = (u32 *)rsxMemalign(RSX_FB_ALIGN, color_size);
++        if (!s_color_buffer[i]) {
++            ps3_logf("[video] FATAL rsxMemalign fallo en color buffer %d (%u bytes)",
++                     i, (unsigned)color_size);
++            return -1;
++        }
++        rsxAddressToOffset(s_color_buffer[i], &s_color_offset[i]);
++        gcmSetDisplayBuffer(i, s_color_offset[i], s_pitch, s_width, s_height);
++    }
++
++    s_depth_buffer = (u32 *)rsxMemalign(RSX_FB_ALIGN, depth_size);
++    if (!s_depth_buffer) {
++        ps3_log("[video] FATAL rsxMemalign fallo en depth buffer");
++        return -1;
++    }
++    rsxAddressToOffset(s_depth_buffer, &s_depth_offset);
++
++    ps3_logf("[video] framebuffers ok: %ux%u pitch=%u color=%u KB depth=%u KB",
++             (unsigned)s_width, (unsigned)s_height, (unsigned)s_pitch,
++             (unsigned)(color_size / 1024), (unsigned)(depth_size / 1024));
++    return 0;
++}
++
++int PS3_Video_Init(void)
++{
++    void *host_addr;
++    s32   ret;
++    s32   vid_res    = VIDEO_RESOLUTION_720;
++    u8    vid_aspect = VIDEO_ASPECT_16_9;
++    videoResolution res;
++    videoConfiguration vconfig;
++
++    /* Idempotencia: rsxInit dos veces filtra el contexto anterior. */
++    if (s_ready) {
++        ps3_log("[video] PS3_Video_Init: ya inicializado, early-return");
++        return 0;
++    }
++
++    ps3_log("[video] PS3_Video_Init: entrando");
++
++    host_addr = memalign(1024 * 1024, RSX_HOST_SIZE);
++    if (!host_addr) {
++        ps3_log("[video] FATAL memalign fallo para el IO buffer de 32MB");
++        return -1;
++    }
++    ps3_logf("[video] host_addr=%p cb=0x%x io=0x%x",
++             host_addr, RSX_CB_SIZE, RSX_HOST_SIZE);
++
++    ret = rsxInit(&s_ctx, RSX_CB_SIZE, RSX_HOST_SIZE, host_addr);
++    ps3_logf("[video] rsxInit ret=%d ctx=%p", (int)ret, (void *)s_ctx);
++    if (ret != 0 || !s_ctx) {
++        ps3_log("[video] FATAL rsxInit fallo");
++        return -1;
++    }
++
++    /* 720p si la TV lo soporta; si no, el modo por defecto del televisor. */
++    if (!videoGetResolutionAvailability(VIDEO_PRIMARY, VIDEO_RESOLUTION_720,
++                                        VIDEO_ASPECT_16_9, 0)) {
++        videoState state;
++        videoGetState(0, 0, &state);
++        vid_res    = state.displayMode.resolution;
++        vid_aspect = state.displayMode.aspect;
++        ps3_log("[video] 720p no disponible, usando el modo por defecto de la TV");
++    }
++
++    videoGetResolution(vid_res, &res);
++    s_width  = res.width;
++    s_height = res.height;
++    ps3_logf("[video] resolucion: %ux%u", (unsigned)s_width, (unsigned)s_height);
++
++    memset(&vconfig, 0, sizeof(vconfig));
++    vconfig.resolution = vid_res;
++    vconfig.format     = VIDEO_BUFFER_FORMAT_XRGB;
++    vconfig.pitch      = s_width * 4;
++    vconfig.aspect     = vid_aspect;
++    videoConfigure(0, &vconfig, NULL, 0);
++    ps3_log("[video] videoConfigure ok");
++
++    if (alloc_framebuffers() < 0) return -1;
++
++    s_cur_fb         = 0;
++    s_cur_rt         = -1;
++    s_flip_queued    = 0;
++    s_flip_completed = 0;
++
++    gcmSetFlipHandler(flip_handler);
++    set_render_target(s_cur_fb);
++
++    s_ready = 1;
++    ps3_log("[video] PS3_Video_Init: OK");
++    return 0;
++}
++
++void PS3_Video_Shutdown(void)
++{
++    int i;
++
++    if (!s_ready) return;
++    ps3_log("[video] shutdown");
++
++    /* ORDEN OBLIGATORIO: primero desenganchar el flip handler. */
++    gcmSetFlipHandler(NULL);
++
++    rsxFinish(s_ctx, 1);
++
++    for (i = 0; i < RSX_FB_COUNT; i++) {
++        if (s_color_buffer[i]) {
++            rsxFree(s_color_buffer[i]);
++            s_color_buffer[i] = NULL;
++        }
++    }
++    if (s_depth_buffer) {
++        rsxFree(s_depth_buffer);
++        s_depth_buffer = NULL;
++    }
++
++    s_cur_rt = -1;
++    s_ready  = 0;
++}
++
++/* Bloquea solo si los dos buffers no mostrados estan en vuelo. */
++static void wait_flips(void)
++{
++    int waited = 0;
++    while ((int)(s_flip_queued - s_flip_completed) > RSX_FB_COUNT - 2) {
++        usleep(100);
++        if (++waited > 20000) {
++            ps3_log("[video] WARNING: flip fence timeout, force-sync");
++            s_flip_completed = s_flip_queued;
++            break;
++        }
++    }
++}
++
++void PS3_Video_BeginFrame(void)
++{
++    if (!s_ready) return;
++    wait_flips();
++    set_render_target(s_cur_fb);
++}
++
++void PS3_Video_Clear(u32 color)
++{
++    if (!s_ready) return;
++
++    /* El scissor puede venir en un estado indefinido: fijarlo a pantalla completa. */
++    rsxSetScissor(s_ctx, 0, 0, s_width, s_height);
++
++    rsxSetColorMask(s_ctx, GCM_COLOR_MASK_R | GCM_COLOR_MASK_G |
++                           GCM_COLOR_MASK_B | GCM_COLOR_MASK_A);
++    rsxSetClearColor(s_ctx, color);
++    rsxSetClearDepthStencil(s_ctx, 0xffffff00);
++    rsxClearSurface(s_ctx, GCM_CLEAR_R | GCM_CLEAR_G | GCM_CLEAR_B |
++                           GCM_CLEAR_A | GCM_CLEAR_S | GCM_CLEAR_Z);
++}
++
++void PS3_Video_EndFrame(void)
++{
++    if (!s_ready) return;
++
++    gcmSetWaitFlip(s_ctx);
++    gcmSetFlip(s_ctx, s_cur_fb);
++    rsxFlushBuffer(s_ctx);
++
++    s_flip_queued++;
++    s_cur_fb = (s_cur_fb + 1) % RSX_FB_COUNT;
++}
++
++u32 PS3_Video_Width(void)  { return s_width;  }
++u32 PS3_Video_Height(void) { return s_height; }
++gcmContextData *PS3_Video_Context(void) { return s_ctx; }
++int PS3_Video_FrameIndex(void) { return s_cur_fb; }
++
++/* Captura del ultimo frame presentado, para las transiciones del motor
++ * (melt/fade): 320x240 en RGB565, filas de 512 (la textura FB del port de
++ * Dreamcast). Solo el area de juego 4:3; muestreo por punto. */
++void PS3_Video_Capture565(unsigned short *dst)
++{
++    u32 vw, vh, vx, vy, x, y;
++    const u32 *src;
++    static int logged = 0;
++
++    if (!s_ready || !dst) return;
++    rsxFinish(s_ctx, 2);                 /* que el RSX termine de dibujar */
++
++    vh = s_height;
++    vw = (s_height * 4) / 3;
++    if (vw > s_width) { vw = s_width; vh = (s_width * 3) / 4; }
++    vx = (s_width - vw) / 2;
++    vy = (s_height - vh) / 2;
++
++    src = s_color_buffer[(s_cur_fb + RSX_FB_COUNT - 1) % RSX_FB_COUNT];
++    for (y = 0; y < 240; y++) {
++        const u32 *row = src + (vy + (y * vh) / 240) * (s_pitch / 4);
++        for (x = 0; x < 320; x++) {
++            u32 c = row[vx + (x * vw) / 320];
++            dst[y * 512 + x] = (unsigned short)(((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x001f));
++        }
++    }
++    if (!logged) { ps3_logf("[video] captura de framebuffer para transicion (%ux%u en %u,%u)", vw, vh, vx, vy); logged = 1; }
++}
++
++/* ------------------------------------------------------------------ */
++/* Pantalla de texto dibujada por CPU, directo en el framebuffer.        */
++/*                                                                      */
++/* Sirve antes de que arranque el motor (no hay fuentes ni texturas del */
++/* juego todavia): la conversion de la ROM en el primer arranque, y los */
++/* errores de datos faltantes. Fuente 8x16 escalada x2 (ps3_font.h).    */
++/* ------------------------------------------------------------------ */
++#define TXT_SCALE 2
++
++static void txt_rect(u32 *fb, int x, int y, int w, int h, u32 c)
++{
++    int i, j;
++    if (x < 0) { w += x; x = 0; }
++    if (y < 0) { h += y; y = 0; }
++    if (x + w > (int)s_width)  w = (int)s_width - x;
++    if (y + h > (int)s_height) h = (int)s_height - y;
++    for (j = 0; j < h; j++) {
++        u32 *row = fb + (y + j) * (s_pitch / 4) + x;
++        for (i = 0; i < w; i++) row[i] = c;
++    }
++}
++
++static void txt_string(u32 *fb, int x, int y, const char *str, u32 c)
++{
++    for (; *str; str++, x += 8 * TXT_SCALE) {
++        unsigned ch = (unsigned char)*str;
++        int gy, gx;
++        if (ch < 32 || ch > 126) ch = '?';
++        for (gy = 0; gy < 16; gy++) {
++            unsigned bits = ps3_font8x16[ch - 32][gy];
++            if (!bits) continue;
++            for (gx = 0; gx < 8; gx++)
++                if (bits & (0x80u >> gx))
++                    txt_rect(fb, x + gx * TXT_SCALE, y + gy * TXT_SCALE, TXT_SCALE, TXT_SCALE, c);
++        }
++    }
++}
++
++void PS3_Video_TextScreen(const char *title, const char *const *lines, int nlines, int percent)
++{
++    u32 *fb;
++    int i, y, bw, bx;
++
++    if (!s_ready) return;
++    wait_flips();
++    rsxFinish(s_ctx, 3);                 /* que el RSX no toque el buffer */
++
++    fb = s_color_buffer[s_cur_fb];
++    txt_rect(fb, 0, 0, (int)s_width, (int)s_height, 0xff000000);
++
++    y = (int)s_height / 5;
++    if (title) {
++        int tw = (int)strlen(title) * 8 * TXT_SCALE;
++        txt_string(fb, ((int)s_width - tw) / 2, y, title, 0xffd02020);
++        y += 16 * TXT_SCALE * 2;
++    }
++    for (i = 0; i < nlines; i++) {
++        if (lines[i])
++            txt_string(fb, (int)s_width / 8, y, lines[i], 0xffe0e0e0);
++        y += 16 * TXT_SCALE + 8;
++    }
++
++    if (percent >= 0) {
++        if (percent > 100) percent = 100;
++        bw = (int)s_width * 3 / 4;
++        bx = ((int)s_width - bw) / 2;
++        y += 24;
++        txt_rect(fb, bx - 4, y - 4, bw + 8, 40, 0xff606060);
++        txt_rect(fb, bx, y, bw, 32, 0xff101010);
++        txt_rect(fb, bx, y, bw * percent / 100, 32, 0xffc03020);
++    }
++
++    __asm__ volatile("sync" ::: "memory");
++    gcmSetWaitFlip(s_ctx);
++    gcmSetFlip(s_ctx, s_cur_fb);
++    rsxFlushBuffer(s_ctx);
++    s_flip_queued++;
++    s_cur_fb = (s_cur_fb + 1) % RSX_FB_COUNT;
++}
+diff --git a/ps3/source/ps3_video.h b/ps3/source/ps3_video.h
+new file mode 100644
+index 0000000..007d77d
+--- /dev/null
++++ b/ps3/source/ps3_video.h
+@@ -0,0 +1,32 @@
++/* ps3_video.h -- init de RSX/GCM, framebuffers y flip. */
++
++#ifndef PS3_VIDEO_H
++#define PS3_VIDEO_H
++
++#include <ppu-types.h>
++#include <rsx/rsx.h>
++#include <rsx/gcm_sys.h>
++
++int  PS3_Video_Init(void);      /* 0 = ok, <0 = error (ver log) */
++void PS3_Video_Shutdown(void);
++
++void PS3_Video_BeginFrame(void);
++void PS3_Video_EndFrame(void);
++
++/* Pinta el framebuffer entero. color = 0xAARRGGBB */
++void PS3_Video_Clear(u32 color);
++
++u32  PS3_Video_Width(void);
++u32  PS3_Video_Height(void);
++gcmContextData *PS3_Video_Context(void);
++
++/* Indice del framebuffer que se esta dibujando (0..2). ps3_rsx.c lo usa para
++ * elegir el segmento del ring de vertices que ya no esta en vuelo. */
++int  PS3_Video_FrameIndex(void);
++void PS3_Video_Capture565(unsigned short *dst);   /* 320x240, filas de 512 */
++
++/* Pantalla de texto por CPU (antes de que arranque el motor): titulo,
++ * lineas y, si percent >= 0, una barra de progreso. Hace el flip. */
++void PS3_Video_TextScreen(const char *title, const char *const *lines, int nlines, int percent);
++
++#endif /* PS3_VIDEO_H */

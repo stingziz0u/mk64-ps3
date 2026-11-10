@@ -40,7 +40,11 @@ extern u8 _startupLogoSegmentRomEnd[];
  *     race   0x8028DF00    size 0x2C470
  **/
 
+#ifdef TARGET_PS3
+#define SEG_START 0
+#else
 #define SEG_START 0x80000000
+#endif
 
 // Defines duplicated even if the same for both for easier readability
 #ifdef AVOID_UB

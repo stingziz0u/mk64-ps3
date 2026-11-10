@@ -34,6 +34,11 @@
 #include "menus.h"
 #include "data/other_textures.h"
 #include "spawn_players.h"
+#ifdef TARGET_PS3
+#include "ps3_game.h"
+#else
+#define PS3_HUD_ANCHOR(a)
+#endif
 #include "sounds.h"
 #include "data/some_data.h"
 
@@ -960,12 +965,16 @@ void func_80058F78(void) {
         if ((!gDemoMode) && (gIsHUDVisible != 0) && (D_801657D8 == 0)) {
             draw_item_window(PLAYER_ONE);
             if (D_801657E4 != 2) {
+                PS3_HUD_ANCHOR(PS3_HUD_RIGHT);
                 render_hud_timer(PLAYER_ONE);
+                PS3_HUD_ANCHOR(PS3_HUD_LEFT);
                 draw_simplified_lap_count(PLAYER_ONE);
                 func_8004EB38(0);
                 if (D_801657E6 != false) {
+                    PS3_HUD_ANCHOR(PS3_HUD_RIGHT);
                     func_8004ED40(0);
                 }
+                PS3_HUD_ANCHOR(PS3_HUD_MIDDLE);
             }
         }
     }
@@ -1040,11 +1049,13 @@ void func_800591B4(void) {
                 }
                 if ((!gDemoMode) && (D_801657E8 != false)) {
                     if (D_80165800[0] != 0) {
+                        PS3_HUD_ANCHOR(PS3_HUD_RIGHT);
                         func_8004EE54(0);
                         if (gModeSelection != BATTLE) {
                             render_mini_map_finish_line(0);
                         }
                         func_8004F3E4(0);
+                        PS3_HUD_ANCHOR(PS3_HUD_MIDDLE);
                     }
                     if ((gScreenModeSelection == SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL) && (D_80165800[1] != 0)) {
                         func_8004EE54(1);
@@ -1055,10 +1066,12 @@ void func_800591B4(void) {
                     }
                 }
             }
+            PS3_HUD_ANCHOR(PS3_HUD_LEFT);
             if ((D_801657E4 != 2) && (gModeSelection == GRAND_PRIX) && (D_8018D2BC != 0)) {
                 func_80050320();
             }
             func_800590D4();
+            PS3_HUD_ANCHOR(PS3_HUD_MIDDLE);
         }
         func_8005902C();
         func_80057DD0();

@@ -87,7 +87,11 @@
 
 #define NUM_SEGMENTS (16)
 #define SEGMENT_OFFSET(a) ((unsigned int) (a) & 0x00ffffff)
+#ifdef TARGET_PS3
+#define SEGMENT_NUMBER(a) ((unsigned int) (a) >> 24)
+#else
 #define SEGMENT_NUMBER(a) (((unsigned int) (a) << 4) >> 28)
+#endif
 #define SEGMENT_NUMBER2(a) ((unsigned int) (a) >> 24)
 #define SEGMENT_ADDR(num, off) (((num) << 24) + (off))
 

@@ -1,90 +1,77 @@
-# Mario Kart 64   
-This decompilation of Mario Kart 64 pursues historical and educational elements within the game found via taking it apart and putting it back together. Inspiration to do so not only emanates from the game's hardware and technology but also its immensely positive effects on the cultures and families of nearly every nationality.
+# mk64-ps3
 
-This repository does not contain assets. Compiling requires asset extraction from a prior copy of the game.
+Native port of **Mario Kart 64** to PS3 homebrew ([PSL1GHT](https://github.com/ps3dev/PSL1GHT)),
+based on the [n64decomp/mk64](https://github.com/n64decomp/mk64) decompilation.
 
-It supports and builds the following versions:
+The repository has **no game assets**: everything is loaded at runtime from your own
+copy of the game (USA ROM).
 
-| ROM Output      | Revision| SHA-1 Checksum                           |
-|-----------------|---------|------------------------------------------|
-| mk64.us.z64     | USA     | 579c48e211ae952530ffc8738709f078d5dd215e |
-| mk64.eu.v10.z64 | EUR 1.0 | a729039453210b84f17019dda3f248d5888f7690 |
-| mk64.eu.v11.z64 | EUR 1.1 | f6b5f519dd57ea59e9f013cc64816e9d273b2329 |
+## Features
 
-## Progress
+- Sound and music (the game's own audio engine, 48 kHz)
+- Internal resolution scaled to 720p
+- Aspect ratio: original 4:3 or 16:9 with the HUD anchored to the screen edges
+- Frame rate: original 30 FPS or 60 FPS (interpolated)
+- FPS counter and *Screen Fit* (overscan) options, in the game's Options menu
+- 1 to 4 players: each extra DualShock 3 is the next player
+- Controller Pak emulation for the Time Trials ghosts (`mk64.mpk`)
+- Button rebinding in `mk64.cfg`
 
-[![Linux Compile](https://github.com/n64decomp/mk64/actions/workflows/linux-compile.yml/badge.svg)](https://github.com/n64decomp/mk64/actions/workflows/linux-compile.yml)
+## Installing
 
-![Build Status](https://n64decomp.github.io/mk64/total_progress.svg)
+1. Install `mk64-1.0.pkg` on the console (Install Package Files).
+2. Copy your **Mario Kart 64 (USA) `.z64`** ROM to the game's `USRDIR` by FTP:
+   `/dev_hdd0/game/MK64PS300/USRDIR/`
+3. Run *mk64-ps3* from the XMB.
 
-## Quick Start
+The game creates `mk64.cfg` (settings), `mk64.eep` (save) and `mk64.mpk` (Controller Pak)
+in the same folder. The log is written there too.
+
+There is also a `-test` PKG (`make TEST=1`) where every race lasts one lap, to try all
+the courses quickly. It uses the same APPID, so it replaces the normal one.
+
+## Controls
+
+Default mapping (every player):
+
+| PS3 | N64 |
+|---|---|
+| Cross | A |
+| Square | B |
+| L1 / L2 | Z |
+| R1 / R2 | R |
+| Select | L |
+| Start | Start |
+| D-pad | D-pad |
+| Triangle, Circle, right stick | C buttons |
+| Left stick | Stick |
+
+To change it, edit the `bind_*` lines of `mk64.cfg`, with button names joined by `+`:
 
 ```
-git submodule update --init --recursive
-OR
-git clone https://github.com/n64decomp/mk64 --recurse-submodules
+bind_a=CROSS
+bind_z=L1+L2
+bind_c_down=
 ```
-Extract assets
-```
-make -C tools -j
-make assets -j
-make -j
-```
+
+Names: `CROSS CIRCLE SQUARE TRIANGLE L1 L2 L3 R1 R2 R3 SELECT START UP DOWN LEFT RIGHT`.
+An empty line leaves that N64 button unassigned.
 
 ## Building
 
-Build instructions located in the [API docs](https://n64decomp.github.io/mk64/compiling.html)  
-See also, the comprehensive API and documentation which includes an overview of the code-base while also discussing significant concepts, features, and modding.
+Needs the [ps3toolchain](https://github.com/ps3dev/ps3toolchain) (`PS3DEV` and `PSL1GHT` set).
 
-## Current State
+```
+cd ps3
+make            # mk64-1.0.pkg
+make TEST=1     # mk64-1.0-test.pkg
+```
 
-The code-base may change significanty overtime as naming and documentation continues.
-Adjustments to the game require compiling with AVOID_UB=1 to enable shiftability. Use DEBUG=1 to enable the games debug mode.
+`ps3/hosttest/` has a software-rasterizer test that runs the game on a PowerPC host under
+qemu (`qemu-ppc64`), used to test without the console.
 
-Some menu textures are compressed using a format called tkmk00. A byte-matching compressor/decompressor does not yet exist.   
+## License / credits
 
-## Project Structure
-	
-	mk64
-	├── asm: Handwritten assembly code, rom header and boot
-	│   ├── non_matchings: Assembly for non-matching sections
-	│   └── os: Libultra handwritten assembly code
-	├── assets: Textures
-	├── courses: Course data, geography, display lists and staff ghosts
-	├── build: Output directory
-	├── data: Misc data, text, audio banks, and instrument sets
-	├── docs: Build guides
-	├── include: Header files
-	├── music: Sequences
-	├── src: C source code for the game
-	|   ├── actors: Individual actors split out from other files
-	│   ├── audio: Sample tables and audio code
-	│   ├── data: Misc data referenced in other C files
-	|   ├── debug: Custom debug code
-	|   ├── ending: Podium ceremony and credits code
-	│   ├── os: Libultra C code
-	|   └── racing: Race and game engine code
-	├── textures: Texture data, bitmaps
-	|   ├── common: Textures common to many courses
-	|   ├── courses: Course specific textures
-	|   ├── crash screen: Crash screen font image
-	│   ├── raw: Raw textures
-    │   ├── standalone: Whole textures
-	|   ├── startup_logo: Reflection map
-	|   └── trophy: Ceremony cutscene podium and trophy textures
-	└── tools: build tools
-
-## Documentation
-
-Documentation available online at [https://n64decomp.github.io/mk64/](https://n64decomp.github.io/mk64/).
-
-Documentation generated using [Doxygen](https://www.doxygen.nl/index.html). Run `make doc` to test locally. Documentation resides in `docs/html`. Open index.html to view the site.
-
-## Contributing
-
-Pull requests are welcome. For major changes, please discuss in the Discord.
-
-Run `make format` to ensure it meets the project's coding standards.
-If code needs to avoid formatting place `// clang-format off` before the code and `// clang-format on` after.
-
-Official Discord: [discord.gg/DuYH3Fh](https://discord.gg/DuYH3Fh)
+Based on the work of the [n64decomp/mk64](https://github.com/n64decomp/mk64) project. Mario
+Kart 64 is a trademark of Nintendo; this project contains none of its assets and you need
+your own legally obtained copy of the game.

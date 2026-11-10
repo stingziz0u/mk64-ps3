@@ -1,0 +1,37 @@
+// mk64-ps3 vertex program: positions arrive in clip space, everything else
+// is passed through to the fragment program (both layouts, see ps3_rsx.c).
+void main(float4 pos  : POSITION,
+          float4 c0   : COLOR0,
+          float4 c1   : COLOR1,
+          float4 t0   : TEXCOORD0,
+          float4 t1   : TEXCOORD1,
+          float4 t2   : TEXCOORD2,
+          float4 t3   : TEXCOORD3,
+          float4 t4   : TEXCOORD4,
+          float4 t5   : TEXCOORD5,
+          float4 t6   : TEXCOORD6,
+          float4 t7   : TEXCOORD7,
+          out float4 opos : POSITION,
+          out float4 oc0  : COLOR0,
+          out float4 oc1  : COLOR1,
+          out float4 ot0  : TEXCOORD0,
+          out float4 ot1  : TEXCOORD1,
+          out float4 ot2  : TEXCOORD2,
+          out float4 ot3  : TEXCOORD3,
+          out float4 ot4  : TEXCOORD4,
+          out float4 ot5  : TEXCOORD5,
+          out float4 ot6  : TEXCOORD6,
+          out float4 ot7  : TEXCOORD7)
+{
+    opos = pos;
+    oc0 = c0;
+    oc1 = c1;
+    ot0 = t0;
+    ot1 = t1;
+    ot2 = t2;
+    ot3 = t3;
+    ot4 = t4;
+    ot5 = t5;
+    ot6 = t6;
+    ot7 = t7;
+}

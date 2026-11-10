@@ -105,3 +105,15 @@ mingw64/
 
 # torch
 torch.hash.yml
+
+# PS3 port build output
+ps3/build/
+ps3/pkgfiles/
+ps3/pkgfiles-test/
+ps3/*.pkg
+ps3/*.self
+*.z64
+*.v64
+*.n64
+ps3/*.eep
+ps3/debugmenu.txt

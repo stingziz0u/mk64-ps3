@@ -1,0 +1,7 @@
+#ifndef CEREMONY_RSP_INIT_80284EE0_H
+#define CEREMONY_RSP_INIT_80284EE0_H
+
+extern Gfx D_80284EE0[];
+extern Gfx D_80284F70[];
+
+#endif
