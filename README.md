@@ -76,5 +76,6 @@ Based on the work of the [n64decomp/mk64](https://github.com/n64decomp/mk64) pro
 Kart 64 is a trademark of Nintendo; this project contains none of its assets and you need
 your own legally obtained copy of the game.
 
-AI disclosure
+## AI disclosure
+
 This project's code was written collaboratively with Claude (Anthropic), working through this port with me in real time over many sessions. Every bit of testing and debugging was done by me on real hardware.
