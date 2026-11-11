@@ -16,6 +16,7 @@ copy of the game (USA ROM).
 - 1 to 4 players: each extra DualShock 3 is the next player
 - Controller Pak emulation for the Time Trials ghosts (`mk64.mpk`)
 - Button rebinding in `mk64.cfg`
+- Mod support: patched and renamed ROMs (see below)
 
 ## Installing
 
@@ -56,6 +57,27 @@ bind_c_down=
 
 Names: `CROSS CIRCLE SQUARE TRIANGLE L1 L2 L3 R1 R2 R3 SELECT START UP DOWN LEFT RIGHT`.
 An empty line leaves that N64 button unassigned.
+
+## Mods and patched ROMs
+
+The game accepts any file name, and a ROM that is not the original as long as it is a Mario
+Kart 64 (USA) ROM (header game code `NKTE`), 12 to 64 MB, in .z64, .v64 or .n64 order.
+If USRDIR has several ROMs, pick one with `rom=<file name>` in `mk64.cfg`.
+
+On the N64 the game runs its data tables from the ROM: where each kart sprite and palette is,
+where each course is, character stats, menu textures. The port rebuilds those tables from the
+ROM that is loaded (599 of them; `ps3/gen/romdata_map.c`, made by `ps3/tools/gen_romdata_map.py`),
+so mods that change them work. With the original ROM nothing changes. The log lists
+every table a mod changed (`[mods] ... taken from the ROM`).
+
+**Works:** replaced or recolored characters and karts, new menu and course textures, changed
+course data (geometry, textures, path tables) and stats, new audio, new intro, as long as the
+mod only changes data. A modified ROM can be read past its end (it gets zeros, as on the N64).
+
+**Does not work:** mods that change the game's *code* (assembly hacks, new game logic): the port
+runs the decompiled C, not the ROM's MIPS code. About 190 read-only tables are not rebuilt
+either. The rest of the port (RSX renderer, audio, menus) assumes the original layout, so
+heavily restructured ROMs may fail even if they load.
 
 ## Building
 
