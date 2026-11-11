@@ -98,6 +98,7 @@ void ps3_audio_tick(void);                /* one 60 Hz tick of the audio thread 
 
 /* source/game/ps3_romdata.c: main-segment data that is not in the source. */
 void ps3_romdata_load(void);
+void ps3_romdata_mods(void);   /* a modified ROM: its data tables (see ps3_romdata.c) */
 extern unsigned char gPs3LowRam[0x10000];
 
 #endif /* PS3_GAME_H */

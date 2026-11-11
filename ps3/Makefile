@@ -40,8 +40,8 @@ CC := ppu-gcc
 LD := ppu-gcc
 
 # Goes up by one with every patch; first line of the log and VERSION.TXT.
-PATCHLEVEL := 22
-VERSION    := 1.0
+PATCHLEVEL := 24
+VERSION    := 1.1
 OUT_PKG    := mk64-$(VERSION).pkg
 
 ROOT := ..
@@ -89,6 +89,8 @@ GAME_CFLAGS += -D_LANGUAGE_C -DTARGET_PS3 -D__PS3__ -DGCC -DNON_MATCHING -DAVOID
 GAME_CFLAGS += -DVERSION_US=1 -DF3DEX_GBI=1 -DF3D_OLD=1 -DIS_BIG_ENDIAN=1 -DIS_64_BIT=0
 GAME_CFLAGS += -Isource/game -Isource -Igen/include -Igen
 GAME_CFLAGS += -I$(ROOT)/include -I$(ROOT)/src -I$(ROOT)/src/racing -I$(ROOT)/src/ending -I$(ROOT)
+# make GAME_EXTRA=-g ...: types for tools/gen_romdata_map.py (see gen/README)
+GAME_CFLAGS += $(GAME_EXTRA)
 ifeq ($(TEST),1)
 GAME_CFLAGS += -DMK64_TEST_ONE_LAP
 PLAT_CFLAGS += -DMK64_TEST_ONE_LAP
@@ -115,7 +117,8 @@ GAME_OBJS := $(GAME_SRCS:%.c=$(OBJ)/game/%.o) $(JP_SRCS:%.c=$(OBJ)/jp/%.o)
 
 # Small main-segment tables generated from the ROM by the decompilation's
 # extractor (see gen/README).
-GEN_SRCS := gen/assets/code/data_800E45C0/data_800E45C0.c gen/assets/code/data_800E8700/data_800E8700.c
+GEN_SRCS := gen/assets/code/data_800E45C0/data_800E45C0.c gen/assets/code/data_800E8700/data_800E8700.c \
+            gen/romdata_map.c
 GEN_OBJS := $(GEN_SRCS:%.c=$(OBJ)/%.o) $(OBJ)/gen/n64_symbols.o
 
 SUP_SRCS := $(notdir $(wildcard source/game/*.c))

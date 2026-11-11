@@ -20,3 +20,14 @@ assets/code/, assets/course_metadata/
     TODO before a public release: decide whether these stay in the repository
     or are read from the user's ROM at start-up like everything else (see
     source/game/ps3_romdata.c, which already does it for one palette).
+
+romdata_map.c
+    How to rebuild, from the ROM that is loaded, the data tables of the N64
+    code segments that the port compiles in (kart sprite and palette tables,
+    the course table, character stats, menu textures...). Used only with a
+    modified ROM, so that mods work (source/game/ps3_romdata.c). Checked
+    against the stock ROM when generated: with it, the map changes nothing.
+    Regenerate when the game's data tables change, from a build with types:
+
+      make GAME_EXTRA=-g OBJ=build/obj-dwarf TARGET=mk64dwarf mk64dwarf.elf
+      python3 tools/gen_romdata_map.py <n64 build>/mk64.us.elf mk64dwarf.elf baserom.us.z64 > gen/romdata_map.c

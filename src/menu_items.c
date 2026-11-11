@@ -1013,7 +1013,7 @@ MenuTexture* D_800E828C[] = {
 // 0x800E8290, in address order (their names are their N64 addresses).
 #define GLYPH_RUN(a) { a, ARRAY_COUNT(a) }
 MenuTexture* gGlyphTextureLUT[(0x800E8290 - 0x800E7E84) / 4];
-static void __attribute__((constructor)) ps3_build_glyph_lut(void) {
+void __attribute__((constructor)) ps3_build_glyph_lut(void) {
     static const struct {
         MenuTexture** list;
         s32 count;

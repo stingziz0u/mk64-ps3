@@ -8,8 +8,11 @@
 
 #include <ultra64.h>
 
+#include <string.h>
+
 #include "ps3_game.h"
 #include "ps3_rom.h"
+#include "ps3_romdata_map.h"
 
 #define MAIN_ROM(vaddr) ((u32) ((vaddr) - 0x80000400U + 0x1000U))
 
@@ -42,4 +45,63 @@ void ps3_romdata_load(void) {
     }
     PS3_Rom_Read(gPs3LowRam + 0x400, 0x1000, sizeof(gPs3LowRam) - 0x400);
     ps3_logf("[romdata] %u block(s) read from the ROM", (unsigned) i);
+    ps3_romdata_mods();
+}
+
+/* ---- mods -------------------------------------------------------------------
+ * The N64 runs its data tables from the ROM: where each kart sprite and palette
+ * is, the course segments, character stats, menu textures... Mods change them.
+ * The port has them compiled in, with the stock values, so with a modified ROM
+ * each table of gen/romdata_map.c is rebuilt from it. With the stock ROM they
+ * are the same (the map is checked against it), so it is only done for others.
+ * N64 RAM addresses in a table are left as they are: the PS3 ones are there. */
+void ps3_build_glyph_lut(void);
+
+void ps3_romdata_mods(void) {
+    static u8 buf[0x4000];
+    int i, j, changed = 0;
+    u32 k;
+
+    if (PS3_Rom_IsStock()) {
+        return;
+    }
+    for (i = 0; i < gPs3RomDataMapCount; i++) {
+        const ps3_romdata_entry* e = &gPs3RomDataMap[i];
+        int diff = 0;
+
+        if (e->size > sizeof(buf) || PS3_Rom_Read(buf, e->romOff, e->size) != 0) {
+            ps3_logf("[mods] %s: could not read it, stock values kept", e->name);
+            continue;
+        }
+        for (j = 0; j < e->nops; j++) {
+            const ps3_romdata_op* op = &e->ops[j];
+
+            if (!op->ptr) {
+                if (memcmp(e->dest + op->ps3Off, buf + op->n64Off, op->n) != 0) {
+                    memcpy(e->dest + op->ps3Off, buf + op->n64Off, op->n);
+                    diff = 1;
+                }
+                continue;
+            }
+            for (k = 0; k < op->n; k++) {
+                const u8* w = buf + op->n64Off + 4 * k;
+                u32 v = ((u32) w[0] << 24) | ((u32) w[1] << 16) | ((u32) w[2] << 8) | w[3];
+                u64* p = (u64*) (e->dest + op->ps3Off + 8 * k);
+
+                if ((v >> 24) == 0x80) {
+                    continue;       /* a RAM address of the N64: not one of ours */
+                }
+                if (*p != (u64) v) {
+                    *p = (u64) v;
+                    diff = 1;
+                }
+            }
+        }
+        if (diff) {
+            ps3_logf("[mods] %s taken from the ROM (differs from stock)", e->name);
+            changed++;
+        }
+    }
+    ps3_build_glyph_lut();      /* a copy of some of those tables */
+    ps3_logf("[mods] %d of %d data tables differ from the stock ROM", changed, gPs3RomDataMapCount);
 }

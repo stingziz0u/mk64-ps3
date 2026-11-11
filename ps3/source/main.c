@@ -173,7 +173,8 @@ static void game_thread(void *arg)
     switch (rc) {
         case PS3_ROM_OK:
             snprintf(l_file, sizeof(l_file), "File: %s", name);
-            snprintf(l_crc, sizeof(l_crc), "CRC32 %08X: Mario Kart 64 (USA)", (unsigned)PS3_Rom_Crc32());
+            snprintf(l_crc, sizeof(l_crc), "CRC32 %08X: %s", (unsigned)PS3_Rom_Crc32(),
+                     PS3_Rom_IsStock() ? "Mario Kart 64 (USA)" : "modified Mario Kart 64 (USA)");
             lines[n++] = "ROM OK.";
             lines[n++] = l_file;
             lines[n++] = l_crc;
@@ -187,12 +188,12 @@ static void game_thread(void *arg)
         case PS3_ROM_BAD_SIZE:
         case PS3_ROM_BAD_GAME:
             snprintf(l_file, sizeof(l_file), "File: %s", name);
-            snprintf(l_crc, sizeof(l_crc), "CRC32 %08X, expected %08X", (unsigned)PS3_Rom_Crc32(),
+            snprintf(l_crc, sizeof(l_crc), "CRC32 %08X (stock ROM: %08X)", (unsigned)PS3_Rom_Crc32(),
                      (unsigned)PS3_ROM_CRC32);
-            lines[n++] = "This is not the Mario Kart 64 (USA) ROM.";
+            lines[n++] = "This is not a Mario Kart 64 (USA) ROM or a hack of it.";
             lines[n++] = l_file;
             if (rc == PS3_ROM_BAD_GAME) lines[n++] = l_crc;
-            else lines[n++] = "The ROM must be 12 MB.";
+            else lines[n++] = "The ROM must be between 12 and 64 MB.";
             break;
         default:
             lines[n++] = "The ROM could not be read. See mk64_log.txt.";

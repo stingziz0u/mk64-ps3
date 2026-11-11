@@ -64,6 +64,23 @@ int PS3_Rom_Read(void *dst, uint32_t off, uint32_t size)
     return 0;
 }
 
+/* The stock ROM, or a modified one (its data tables are taken from it). */
+int PS3_Rom_IsStock(void)
+{
+    static int stock = -1;
+    if (stock < 0) {
+        uint32_t c = 0xFFFFFFFFu, i;
+        int j;
+        for (i = 0; i < ROM_SIZE; i++) {
+            c ^= s_rom[i];
+            for (j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        }
+        stock = (c ^ 0xFFFFFFFFu) == PS3_ROM_CRC32;
+        ps3_logf("[rom] %s ROM", stock ? "stock" : "modified");
+    }
+    return stock;
+}
+
 /* ---- ps3_plat.h ---- */
 uint64_t PS3_Plat_TimeUs(void) { return s_time_us; }
 void PS3_Plat_SleepUs(uint64_t us) { s_time_us += us; }
