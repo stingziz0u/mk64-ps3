@@ -2804,26 +2804,42 @@ void func_80016C3C(UNUSED s32 playerId, UNUSED f32 arg1, s32 cameraId) {
         D_80163DD8[cameraId] = random_int(4U);
         D_80164688[cameraId] = 0.0f;
     }
+#ifdef TARGET_PS3
+    /*
+     * Yoshi Valley has four paths. The camera shots of the end of the race
+     * placed the camera with one path's numbers on another path's points,
+     * and ended up behind the cliffs or looking away: each shot now uses one
+     * path for everything (on the courses with a single path nothing changes).
+     * This one follows the path of the player it films.
+     */
+    if (gCurrentCourseId == COURSE_YOSHI_VALLEY) {
+        D_80163DD8[cameraId] = gPathIndexByPlayerId[playerId];
+    }
+#define PS3_SHOT9_PATH D_80163DD8[cameraId]
+#else
+#define PS3_SHOT9_PATH 0
+#endif
     temp_s0 = gPathCountByPathIndex[D_80163DD8[cameraId]];
     gNearestPathPointByCameraId[cameraId] %= temp_s0;
-    set_track_offset_position(gNearestPathPointByCameraId[cameraId], D_80164688[cameraId], 0);
+    set_track_offset_position(gNearestPathPointByCameraId[cameraId], D_80164688[cameraId], PS3_SHOT9_PATH);
     D_801645F8[cameraId] = gOffsetPosition[0];
-    D_80164618[cameraId] = gTrackPaths[0][gNearestPathPointByCameraId[cameraId]].posY;
+    D_80164618[cameraId] = gTrackPaths[PS3_SHOT9_PATH][gNearestPathPointByCameraId[cameraId]].posY;
     path = gTrackPaths;
     D_80164638[cameraId] = gOffsetPosition[2];
     D_80164658[cameraId] = 16.666666f;
     D_80164648[cameraId] = 0.0f;
     sp48 = (gNearestPathPointByCameraId[cameraId] + 0xA) % temp_s0;
     sp44 = (gNearestPathPointByCameraId[cameraId] + 0xB) % temp_s0;
-    set_track_offset_position(sp48, D_80164688[cameraId], 0);
+    set_track_offset_position(sp48, D_80164688[cameraId], PS3_SHOT9_PATH);
     temp_f2 = gOffsetPosition[0] * 0.5;
     temp_f12 = gOffsetPosition[2] * 0.5;
-    set_track_offset_position(sp44, D_80164688[cameraId], 0);
+    set_track_offset_position(sp44, D_80164688[cameraId], PS3_SHOT9_PATH);
     temp_f2 += gOffsetPosition[0] * 0.5;
     temp_f12 += gOffsetPosition[2] * 0.5;
     sp48 = (gNearestPathPointByCameraId[cameraId] + 0x5) % temp_s0;
     sp44 = (gNearestPathPointByCameraId[cameraId] + 0x6) % temp_s0;
-    sp54 = (path[0][sp48].posY + path[0][sp44].posY) * 0.5f;
+    sp54 = (path[PS3_SHOT9_PATH][sp48].posY + path[PS3_SHOT9_PATH][sp44].posY) * 0.5f;
+#undef PS3_SHOT9_PATH
     camera = cameras;
     camera += cameraId;
     camera->lookAt[0] = temp_f2;
@@ -2872,7 +2888,11 @@ void func_80017054(Camera* camera, UNUSED Player* player, UNUSED s32 index, s32 
     gNearestPathPointByCameraId[cameraId] = func_8000D33C(camera->pos[0], camera->pos[1], camera->pos[2], gNearestPathPointByCameraId[cameraId], pathIndex);
     if (gCurrentCourseId == 4) {
         if ((sp56 != gNearestPathPointByCameraId[cameraId]) && (gNearestPathPointByCameraId[cameraId] == 1)) {
+#ifdef TARGET_PS3
+            D_80163DD8[cameraId] = gPathIndexByPlayerId[playerId];
+#else
             D_80163DD8[cameraId] = random_int(4);
+#endif
             pathIndex = D_80163DD8[cameraId];
             gNearestPathPointByCameraId[cameraId] = func_8000D33C(camera->pos[0], camera->pos[1], camera->pos[2], gNearestPathPointByCameraId[cameraId], pathIndex);
         }
@@ -3305,9 +3325,14 @@ void func_800188F4(Camera* camera, UNUSED Player* unusePlayer, UNUSED s32 arg2, 
     camera->rot[2] = 0;
 }
 
+#ifdef TARGET_PS3
+#define PS3_SHOT12_PATH pathIndex
+#else
+#define PS3_SHOT12_PATH 0
+#endif
 void func_80019118(s32 playerId, f32 arg1, s32 cameraId, UNUSED s16 pathIndex) {
     Camera* camera = cameras + cameraId;
-    s32 test = gPathCountByPathIndex[0];
+    s32 test = gPathCountByPathIndex[PS3_SHOT12_PATH];
     f32 temp_f12;
     f32 temp_f2;
 
@@ -3315,10 +3340,10 @@ void func_80019118(s32 playerId, f32 arg1, s32 cameraId, UNUSED s16 pathIndex) {
     gNearestPathPointByCameraId[cameraId] = gNearestPathPointByPlayerId[playerId] + 12;
     gNearestPathPointByCameraId[cameraId] = gNearestPathPointByCameraId[cameraId] % test;
 
-    set_track_offset_position(gNearestPathPointByCameraId[cameraId], arg1, 0);
+    set_track_offset_position(gNearestPathPointByCameraId[cameraId], arg1, PS3_SHOT12_PATH);
     D_801645F8[cameraId] = gOffsetPosition[0];
     D_80164638[cameraId] = gOffsetPosition[2];
-    temp_f2 = (f32) gTrackPaths[0][gNearestPathPointByCameraId[cameraId]].posY;
+    temp_f2 = (f32) gTrackPaths[PS3_SHOT12_PATH][gNearestPathPointByCameraId[cameraId]].posY;
 
     temp_f12 = get_surface_height(gOffsetPosition[0], (temp_f2 + 30.0), gOffsetPosition[2]);
 
@@ -3354,7 +3379,7 @@ void func_8001933C(Camera* camera, UNUSED Player* playerArg, UNUSED s32 arg2, s3
     player += playerId;
     pathPointCount = gPathCountByPathIndex[pathIndex];
     gNearestPathPointByCameraId[cameraId] =
-        func_8000D33C(camera->pos[0], camera->pos[1], camera->pos[2], gNearestPathPointByCameraId[cameraId], 0);
+        func_8000D33C(camera->pos[0], camera->pos[1], camera->pos[2], gNearestPathPointByCameraId[cameraId], PS3_SHOT12_PATH);
     playerPathPoint = gNearestPathPointByPlayerId[playerId];
     cameraPathPoint = gNearestPathPointByCameraId[cameraId];
     if (is_path_point_in_range(playerPathPoint, cameraPathPoint, 0x0032U, 0x0014U, pathPointCount) <= 0) {
@@ -3433,27 +3458,49 @@ void camera_start_cinematic_shot(s32 playerId, s32 cameraId) {
     D_801646C0[cameraId] = 0;
     pathIndex = gPathIndexByPlayerId[playerId];
 
+#ifdef TARGET_PS3
+    /*
+     * Shots 15 and 16 stand still at the finish line and look at the path
+     * point nearest to wherever the camera was before. In Yoshi Valley (a
+     * canyon with four paths) that point is on the other side of the cliffs:
+     * the camera looked over the edge of the map, or at an empty path while
+     * the kart went by another. There the shot that follows the kart along
+     * its own path (8, the one for second to fourth place) is used instead.
+     */
+    if ((gCurrentCourseId == COURSE_YOSHI_VALLEY) &&
+        (((s16) D_80164680[cameraId] == 15) || ((s16) D_80164680[cameraId] == 16))) {
+        D_80164680[cameraId] = 8;
+    }
+#endif
+
+#ifdef TARGET_PS3
+    /* The shots beside the kart stand at the edge of the path, which in Yoshi
+     * Valley is inside or next to the cliffs: there, half way to the edge. */
+#define SIDE(f) ((gCurrentCourseId == COURSE_YOSHI_VALLEY) ? (f) * 0.5f : (f))
+#else
+#define SIDE(f) (f)
+#endif
     switch (D_80164680[cameraId]) {
         case 0:
             func_80015314(playerId, 0.0f, cameraId);
             break;
         case 2:
-            func_80015544(playerId, -1.0f, cameraId, pathIndex);
+            func_80015544(playerId, SIDE(-1.0f), cameraId, pathIndex);
             break;
         case 3:
-            func_80015544(playerId, 1.0f, cameraId, pathIndex);
+            func_80015544(playerId, SIDE(1.0f), cameraId, pathIndex);
             break;
         case 6:
-            func_80015A9C(playerId, -0.6f, cameraId, (s16) pathIndex);
+            func_80015A9C(playerId, SIDE(-0.6f), cameraId, (s16) pathIndex);
             break;
         case 7:
-            func_80015A9C(playerId, 0.6f, cameraId, (s16) pathIndex);
+            func_80015A9C(playerId, SIDE(0.6f), cameraId, (s16) pathIndex);
             break;
         case 4:
-            func_800162CC(playerId, -1.0f, cameraId, (s16) pathIndex);
+            func_800162CC(playerId, SIDE(-1.0f), cameraId, (s16) pathIndex);
             break;
         case 5:
-            func_800162CC(playerId, 1.0f, cameraId, (s16) pathIndex);
+            func_800162CC(playerId, SIDE(1.0f), cameraId, (s16) pathIndex);
             break;
         case 9:
             func_80016C3C(playerId, 0.0f, cameraId);
@@ -3468,10 +3515,10 @@ void camera_start_cinematic_shot(s32 playerId, s32 cameraId) {
             func_80018718(playerId, 0.0f, cameraId, (s16) pathIndex);
             break;
         case 12:
-            func_80019118(playerId, -1.0f, cameraId, (s16) pathIndex);
+            func_80019118(playerId, SIDE(-1.0f), cameraId, (s16) pathIndex);
             break;
         case 13:
-            func_80019118(playerId, 1.0f, cameraId, (s16) pathIndex);
+            func_80019118(playerId, SIDE(1.0f), cameraId, (s16) pathIndex);
             break;
         case 15:
             func_8001969C(playerId, -1.0f, cameraId, (s16) pathIndex);
@@ -3483,6 +3530,7 @@ void camera_start_cinematic_shot(s32 playerId, s32 cameraId) {
             func_80015314(playerId, 0.0f, cameraId);
             break;
     }
+#undef SIDE
     gNearestPathPointByCameraId[cameraId] =
         func_8000BD94(camera->pos[0], camera->pos[1], camera->pos[2], (s32) pathIndex);
     if ((s16) D_80164680[cameraId] == 9) {
