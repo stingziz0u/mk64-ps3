@@ -27,6 +27,9 @@ struct ps3_rtex { int w, h; uint32_t *px; };
 
 static float s_color[H][WMAX][3];
 static float s_depth[H][WMAX];
+/* The last drawn frame for PS3_Rsx_ReadFrame (only dumped frames are drawn). */
+static float s_last[H][PS3_SCREEN_W][3];
+static int s_have_last;
 static unsigned s_frame;
 static unsigned s_dump[256];
 static int s_ndump = -1;
@@ -79,6 +82,9 @@ void PS3_Rsx_EndFrame(void)
     FILE *f;
 
     if (!s_want) return;
+    for (y = 0; y < H; y++)            /* the 4:3 middle, as on the console */
+        memcpy(s_last[y], s_color[y][(W - PS3_SCREEN_W) / 2], sizeof(s_last[y]));
+    s_have_last = 1;
     snprintf(name, sizeof(name), "frame_%05u.ppm", s_frame);
     f = fopen(name, "wb");
     if (!f) return;
@@ -91,6 +97,25 @@ void PS3_Rsx_EndFrame(void)
             }
     fclose(f);
     printf("[host] wrote %s\n", name);
+}
+
+
+int PS3_Rsx_ReadFrame(int x, int y, int w, int h, uint16_t *dst)
+{
+    int i, j, k;
+    if (!s_have_last) return 0;
+    for (j = 0; j < h; j++)
+        for (i = 0; i < w; i++) {
+            int nx = x + i < 0 ? 0 : x + i >= PS3_SCREEN_W ? PS3_SCREEN_W - 1 : x + i;
+            int ny = y + j < 0 ? 0 : y + j >= H ? H - 1 : y + j;
+            unsigned c[3];
+            for (k = 0; k < 3; k++) {
+                float v = s_last[ny][nx][k];
+                c[k] = (unsigned)(v <= 0 ? 0 : v >= 1 ? 31 : v * 31.0f + 0.5f);
+            }
+            dst[j * w + i] = (uint16_t)((c[0] << 11) | (c[1] << 6) | (c[2] << 1) | 1);
+        }
+    return 1;
 }
 
 ps3_rtex_t *PS3_Rsx_TexCreate(int w, int h, const uint32_t *argb)

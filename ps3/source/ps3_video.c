@@ -278,6 +278,15 @@ u32 PS3_Video_Height(void) { return s_height; }
 gcmContextData *PS3_Video_Context(void) { return s_ctx; }
 int PS3_Video_FrameIndex(void) { return s_cur_fb; }
 
+const u32 *PS3_Video_LastShown(u32 *pitch)
+{
+    u32 done = s_flip_completed;
+
+    if (!s_ready || done == 0) return NULL;
+    *pitch = s_pitch;
+    return s_color_buffer[(done - 1) % RSX_FB_COUNT];
+}
+
 /* Captura del ultimo frame presentado, para las transiciones del motor
  * (melt/fade): 320x240 en RGB565, filas de 512 (la textura FB del port de
  * Dreamcast). Solo el area de juego 4:3; muestreo por punto. */

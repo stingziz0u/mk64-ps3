@@ -84,6 +84,12 @@ void PS3_Rsx_Draw(const ps3_rstate_t *st, const ps3_rvert_t *v, int n);
 /* Clears the whole depth buffer. */
 void PS3_Rsx_ClearDepth(void);
 
+/* The N64 framebuffer as a texture (the big screens of Luigi Raceway and
+ * Wario Stadium copy part of the last frame into their texture): w*h pixels
+ * of the last finished frame from N64 pixel (x,y), as RGBA5551 like the
+ * N64's framebuffer. 0 = no frame yet (dst left alone). */
+int PS3_Rsx_ReadFrame(int x, int y, int w, int h, uint16_t *dst);
+
 /* Diagnostics (R3 cycles the mode, L3 logs every draw of the next frame).
  * Each mode switches one part of the pipeline off, to find which one hides
  * something on the console. */

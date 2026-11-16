@@ -24,6 +24,10 @@ gcmContextData *PS3_Video_Context(void);
  * elegir el segmento del ring de vertices que ya no esta en vuelo. */
 int  PS3_Video_FrameIndex(void);
 void PS3_Video_Capture565(unsigned short *dst);   /* 320x240, filas de 512 */
+/* The colour buffer of the last frame the RSX finished and showed (it is
+ * not drawn into until the next flip completes); NULL before the first.
+ * *pitch in bytes. */
+const u32 *PS3_Video_LastShown(u32 *pitch);
 
 /* Pantalla de texto por CPU (antes de que arranque el motor): titulo,
  * lineas y, si percent >= 0, una barra de progreso. Hace el flip. */

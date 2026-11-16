@@ -365,6 +365,39 @@ void PS3_Rsx_ClearDepth(void)
 
 /* ------------------------------------------------------------------ */
 
+/* The colour buffer is in RSX memory, which the PPU may hold in its cache
+ * from the last read: each line is flushed (dcbf) before it is read. One
+ * sample per N64 pixel, at its centre. */
+int PS3_Rsx_ReadFrame(int x, int y, int w, int h, uint16_t *dst)
+{
+    const u32 *fb;
+    u32 pitch;
+    int i, j;
+
+    if (!s_ready || w <= 0 || h <= 0) return 0;
+    fb = PS3_Video_LastShown(&pitch);
+    if (!fb) return 0;
+    for (j = 0; j < h; j++) {
+        int ny = y + j;
+        u32 sy = s_vy + (u32)((ny < 0 ? 0 : ny >= PS3_SCREEN_H ? PS3_SCREEN_H - 1 : ny) * 2 + 1) * s_vh / (2 * PS3_SCREEN_H);
+        const u8 *row = (const u8 *)fb + sy * pitch;
+        u32 sx0 = s_vx + (u32)((x < 0 ? 0 : x) * 2 + 1) * s_vw / (2 * PS3_SCREEN_W);
+        u32 sx1 = s_vx + (u32)((x + w - 1 >= PS3_SCREEN_W ? PS3_SCREEN_W - 1 : x + w - 1) * 2 + 1) * s_vw / (2 * PS3_SCREEN_W);
+        const u8 *p;
+
+        for (p = row + ((sx0 * 4) & ~127u); p <= row + sx1 * 4; p += 128)
+            __asm__ volatile("dcbf 0,%0" :: "r"(p) : "memory");
+        __asm__ volatile("sync" ::: "memory");
+        for (i = 0; i < w; i++) {
+            int nx = x + i;
+            u32 sx = s_vx + (u32)((nx < 0 ? 0 : nx >= PS3_SCREEN_W ? PS3_SCREEN_W - 1 : nx) * 2 + 1) * s_vw / (2 * PS3_SCREEN_W);
+            u32 c = ((const u32 *)row)[sx];
+            dst[j * w + i] = (uint16_t)(((c >> 8) & 0xF800) | ((c >> 5) & 0x07C0) | ((c >> 2) & 0x003E) | 1);
+        }
+    }
+    return 1;
+}
+
 static u32 wrap_mode(int w)
 {
     return w == PS3_WRAP_CLAMP ? GCM_TEXTURE_CLAMP_TO_EDGE :

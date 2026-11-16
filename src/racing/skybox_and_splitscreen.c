@@ -1439,6 +1439,17 @@ void func_802A74BC(void) {
     }
 }
 
+#ifdef TARGET_PS3
+/* The RSX draws the game, not into gPhysicalFramebuffers: the big screens
+ * (Luigi Raceway, Wario Stadium) take the pixels from the last frame the RSX
+ * finished. */
+int PS3_Rsx_ReadFrame(int x, int y, int w, int h, u16* dst);
+
+void copy_framebuffer(s32 arg0, s32 arg1, s32 width, s32 height, u16* source, u16* target) {
+    (void) source;
+    PS3_Rsx_ReadFrame(arg0, arg1, width, height, target);
+}
+#else
 void copy_framebuffer(s32 arg0, s32 arg1, s32 width, s32 height, u16* source, u16* target) {
     s32 var_v1;
     s32 var_a1;
@@ -1453,6 +1464,7 @@ void copy_framebuffer(s32 arg0, s32 arg1, s32 width, s32 height, u16* source, u1
         }
     }
 }
+#endif
 
 void func_802A7728(void) {
     s16 temp_v0;
