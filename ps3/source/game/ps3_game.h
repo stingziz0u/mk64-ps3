@@ -12,6 +12,7 @@ void ps3_vblank(void);                    /* one 60 Hz tick */
 
 /* src/racing/memory.c */
 void ps3_init_segment_table(void);
+void ps3_segment_reload(int which);     /* 0 racing, 1 ending: see ps3_segments.c */
 
 /* src/audio/load.c */
 void audio_init(void);

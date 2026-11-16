@@ -493,7 +493,9 @@ void display_and_vsync(void) {
 
 void init_segment_ending_sequences(void) {
 #ifdef TARGET_PS3
-    // The "ending" and "racing" code segments are part of the executable.
+    // The "ending" and "racing" code segments are part of the executable:
+    // only their variables are put back as they are in the ROM.
+    ps3_segment_reload(1);
     return;
 #endif
     bzero((void*) SEG_ENDING, SEG_ENDING_SIZE);
@@ -505,6 +507,7 @@ void init_segment_ending_sequences(void) {
 
 void init_segment_racing(void) {
 #ifdef TARGET_PS3
+    ps3_segment_reload(0);
     return;
 #endif
     bzero((void*) SEG_RACING, SEG_RACING_SIZE);

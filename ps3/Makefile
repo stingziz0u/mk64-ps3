@@ -40,7 +40,7 @@ CC := ppu-gcc
 LD := ppu-gcc
 
 # Goes up by one with every patch; first line of the log and VERSION.TXT.
-PATCHLEVEL := 26
+PATCHLEVEL := 27
 VERSION    := 1.1
 OUT_PKG    := mk64-$(VERSION).pkg
 
@@ -115,6 +115,31 @@ GAME_SRCS := $(filter-out $(JP_SRCS),$(GAME_SRCS))
 
 GAME_OBJS := $(GAME_SRCS:%.c=$(OBJ)/game/%.o) $(JP_SRCS:%.c=$(OBJ)/jp/%.o)
 
+# The N64 reloads two code segments from the ROM, variables included:
+# "racing" before every race and "ending" before every award ceremony
+# (init_segment_racing, init_segment_ending_sequences in src/main.c). Here
+# those variables go into sections of their own (the same objects as in
+# mk64.ld) and source/game/ps3_segments.c restores them.
+SEG_RACING_DATA := src/racing/race_logic src/racing/render_courses src/racing/actors \
+                   src/racing/skybox_and_splitscreen src/racing/memory courses/courseTable \
+                   src/racing/actors_extended src/racing/math_util
+SEG_RACING_BSS  := src/racing/race_logic src/racing/actors src/racing/memory src/buffers/random
+SEG_ENDING_DATA := src/ending/podium_ceremony_actors src/ending/code_80281780 \
+                   src/ending/dl_unk_80284EE0 src/ending/credits src/ending/ceremony_and_credits
+SEG_ENDING_BSS  := src/ending/code_80280000 src/ending/podium_ceremony_actors \
+                   src/ending/code_80281C40 src/ending/ceremony_and_credits
+seg_name     = $(if $(filter $1,$(SEG_RACING_DATA) $(SEG_RACING_BSS)),racing,$(if $(filter $1,$(SEG_ENDING_DATA) $(SEG_ENDING_BSS)),ending))
+seg_has_data = $(filter $1,$(SEG_RACING_DATA) $(SEG_ENDING_DATA))
+seg_has_bss  = $(filter $1,$(SEG_RACING_BSS) $(SEG_ENDING_BSS))
+# One .data/.bss per object (no -fdata-sections), and no common symbols in
+# the objects whose bss goes into the segment.
+seg_cflags   = $(if $(call seg_name,$1),-fno-data-sections $(if $(call seg_has_bss,$1),-fno-common))
+seg_objcopy  = $(if $(call seg_name,$1),ppu-objcopy \
+                 $(if $(call seg_has_data,$1),--rename-section .data=mk64_$(call seg_name,$1)_data \
+                   --rename-section .data.rel=mk64_$(call seg_name,$1)_data \
+                   --rename-section .data.rel.local=mk64_$(call seg_name,$1)_data) \
+                 $(if $(call seg_has_bss,$1),--rename-section .bss=mk64_$(call seg_name,$1)_bss) $2)
+
 # Small main-segment tables generated from the ROM by the decompilation's
 # extractor (see gen/README).
 GEN_SRCS := gen/assets/code/data_800E45C0/data_800E45C0.c gen/assets/code/data_800E8700/data_800E8700.c \
@@ -183,12 +208,14 @@ $(OBJ)/gen/%.o: gen/%.c
 # silenced so that only the warnings of OUR code show.
 $(OBJ)/game/%.o: $(ROOT)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(GAME_CFLAGS) -w -c $< -o $@
+	$(CC) $(GAME_CFLAGS) $(call seg_cflags,$*) -w -c $< -o $@
+	$(call seg_objcopy,$*,$@)
 
 $(OBJ)/jp/%.o: $(ROOT)/%.c
 	@mkdir -p $(dir $@)
 	iconv -f UTF-8 -t EUC-JP $< > $(@:.o=.jp.c)
-	$(CC) $(GAME_CFLAGS) -w -I$(dir $<) -MT $@ -MF $(@:.o=.d) -c $(@:.o=.jp.c) -o $@
+	$(CC) $(GAME_CFLAGS) $(call seg_cflags,$*) -w -I$(dir $<) -MT $@ -MF $(@:.o=.d) -c $(@:.o=.jp.c) -o $@
+	$(call seg_objcopy,$*,$@)
 
 # --no-multi-toc: one TOC for the whole program. The game is small enough
 # (the link fails if it ever is not) and it avoids the TOC-switching stubs.
