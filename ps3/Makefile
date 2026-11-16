@@ -40,7 +40,7 @@ CC := ppu-gcc
 LD := ppu-gcc
 
 # Goes up by one with every patch; first line of the log and VERSION.TXT.
-PATCHLEVEL := 25
+PATCHLEVEL := 26
 VERSION    := 1.1
 OUT_PKG    := mk64-$(VERSION).pkg
 

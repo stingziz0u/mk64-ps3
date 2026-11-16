@@ -549,7 +549,7 @@ void func_8028EF28(void) {
                     currentPosition = player->currentRank;
 #ifdef TARGET_PS3
                     {
-                        extern int gPs3HostFirstPlace;   // host test only (MK64_FIRST): 0 on the console
+                        extern int gPs3HostFirstPlace;   // host test (MK64_FIRST) and autowin.txt; else 0
                         if (gPs3HostFirstPlace) {
                             currentPosition = 0;
                         }

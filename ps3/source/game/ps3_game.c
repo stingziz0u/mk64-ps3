@@ -42,7 +42,37 @@ static void log_frame(const char* why) {
              (unsigned long) ((gHeapEndPtr - gNextFreeMemoryAddress) / 1024));
 }
 
-int gPs3HostFirstPlace;   /* host test: the player's finishing place counts as first */
+int gPs3HostFirstPlace;   /* the players' finishing place counts as first (host test, autowin.txt) */
+
+/* autowin.txt in USRDIR: every race is won 5 s after the start (to get to
+ * the award ceremony quickly). The human players are given their last lap,
+ * and their place counts as first. */
+static int sAutoWin;
+
+static void autowin_frame(void) {
+    extern s32 gLapCountByPlayerId[];
+    static int raceFrames;
+    int i;
+
+    if (!sAutoWin) {
+        return;
+    }
+    if (gGamestate != RACING || gRaceState != RACE_IN_PROGRESS) {
+        raceFrames = 0;
+        return;
+    }
+    if (++raceFrames != 150) {
+        return;
+    }
+    gPs3HostFirstPlace = 1;
+    for (i = 0; i < gPlayerCount && i < 4; i++) {
+        if (gPlayers[i].type & PLAYER_HUMAN) {
+            gLapCountByPlayerId[i] = 3;
+        }
+    }
+    ps3_logf("[autowin] race won (course %d, cup %d, race %d)", (int) gCurrentCourseId, (int) gCupSelection,
+             (int) gCourseIndexInCup);
+}
 
 /* ---- the port's options --------------------------------------------------
  * mk64.cfg, one "key=value" per line. Written whenever an option changes. */
@@ -319,6 +349,7 @@ void ps3_frame_end(void) {
     lastState = gGamestate;
     lastMenu = gMenuSelection;
 
+    autowin_frame();
     PS3_Plat_Pump();
     PS3_Plat_Pad(0, &pad);
     {
@@ -436,6 +467,8 @@ void PS3_Game_Run(void) {
         char c;
         gPs3DebugMenu = PS3_Plat_LoadFile("debugmenu.txt", &c, 1) >= 0;
         ps3_logf("[game] debug menu (debugmenu.txt): %s", gPs3DebugMenu ? "ON" : "off");
+        sAutoWin = PS3_Plat_LoadFile("autowin.txt", &c, 1) >= 0;
+        ps3_logf("[game] races won after 5 s (autowin.txt): %s", sAutoWin ? "ON" : "off");
         ps3_config_load();
     }
     ps3_romdata_load();
